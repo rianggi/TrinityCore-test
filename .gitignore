@@ -23,3 +23,6 @@ nbproject/*
 cmake-build-*/*
 .vs
 *.user
+
+# PowerShell scripts
+*.ps1
