@@ -1204,8 +1204,17 @@ class spell_dk_raise_dead : public SpellScript
 
     void HandleDummy(SpellEffIndex /*effIndex*/)
     {
-        uint32 spellId = SPELL_DK_RAISE_DEAD_SUMMON;
-        GetCaster()->CastSpell(nullptr, spellId, true);
+        Unit* caster = GetCaster();
+        if (!caster)
+            return;
+
+        // Raise Dead (46584) is only the visible wrapper spell in current data.
+        // Trigger the real ghoul summon spell (52150) from the caster itself so
+        // summon target resolution has a valid unit context.
+        // Do not clear auras or pet state here; stale permanent-pet state must be
+        // cleaned from character data before casting, otherwise CheckCast can stop
+        // this spell before the script is reached.
+        caster->CastSpell(caster, SPELL_DK_RAISE_DEAD_SUMMON, true);
     }
 
     void Register() override

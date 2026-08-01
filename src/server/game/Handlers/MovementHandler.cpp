@@ -523,6 +523,20 @@ void WorldSession::HandleMovementOpcode(OpcodeClient opcode, MovementInfo& movem
         _player->UnsummonBattlePetTemporaryIfAny(true);
     }
 
+    // 玩家从空中落地时，重新召唤之前临时解散的宠物。
+    // 原版 BUG：玩家骑飞行坐骑起飞时 UnsummonPetTemporaryIfAny 记录 PetNumber 并移除宠物，
+    // 但如果玩家在半空中下坐骑（Dismount），由于玩家仍有 MOVEMENTFLAG_FLYING，
+    // IsPetNeedBeTemporaryUnsummoned() 返回 true，ResummonPetTemporaryUnSummonedIfAny
+    // 直接返回，不召唤宠物。落地时 CMSG_MOVE_FALL_LAND 没有对应的 resummon 逻辑，
+    // 导致宠物永久消失、亡者复生 aura 残留技能变暗不可用。
+    // 修复：在落地时（CMSG_MOVE_FALL_LAND）检测到有临时解散的宠物则重新召唤。
+    // 额外条件：玩家不能在坐骑上，避免飞行坐骑卡地形时短暂触地导致食尸鬼错误重现。
+    if (opcode == CMSG_MOVE_FALL_LAND && plrMover && !plrMover->IsMounted())
+    {
+        _player->ResummonPetTemporaryUnSummonedIfAny();
+        _player->ResummonBattlePetTemporaryUnSummonedIfAny();
+    }
+
     /* process position-change */
     movementInfo.guid = mover->GetGUID();
     movementInfo.time = AdjustClientMovementTime(movementInfo.time);

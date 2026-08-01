@@ -29,7 +29,8 @@ WorldPacket const* PetSpells::Write()
     _worldPacket << uint8(CommandState);
     _worldPacket << uint8(Flag);
     _worldPacket << uint8(ReactState);
-    _worldPacket.append(ActionButtons.data(), ActionButtons.size());
+    for (int32 actionButton : ActionButtons)
+        _worldPacket << int32(actionButton);
     _worldPacket << Size<uint32>(Actions);
     _worldPacket << Size<uint32>(Cooldowns);
     _worldPacket << Size<uint32>(SpellHistory);

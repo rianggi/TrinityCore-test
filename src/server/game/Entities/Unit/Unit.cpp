@@ -66,6 +66,7 @@
 #include "OutdoorPvP.h"
 #include "PartyPackets.h"
 #include "Pet.h"
+#include "PetAI.h"
 #include "PetPackets.h"
 #include "PhasingHandler.h"
 #include "Player.h"
@@ -854,7 +855,9 @@ bool Unit::HasBreakableByDamageCrowdControlAura(Unit const* excludeCasterChannel
     }
 
     // Signal to pets that their owner was attacked - except when DOT.
-    if (attacker != victim && damagetype != DOT)
+    // 零伤害攻击、目标选择或战斗状态创建不应被算作"主人受到伤害"，
+    // 以保证DK食尸鬼防御行为的严格性。
+    if (damageTaken && attacker != victim && damagetype != DOT)
     {
         for (Unit* controlled : victim->m_Controlled)
             if (Creature* cControlled = controlled->ToCreature())
@@ -906,6 +909,48 @@ bool Unit::HasBreakableByDamageCrowdControlAura(Unit const* excludeCasterChannel
             /// @todo check packets if damage is done by victim, or by attacker of victim
             Unit::DealDamageMods(attacker, shareDamageTarget, share, nullptr);
             Unit::DealDamage(attacker, shareDamageTarget, share, nullptr, NODAMAGE, spell->GetSchoolMask(), spell, false);
+        }
+    }
+
+    // DK永久食尸鬼战斗归属需要真实伤害来源事件。
+    // 威胁记录不可靠，因为黑暗突变期间宠物伤害可能归属到主人。
+    // 只有当实际伤害攻击者是玩家本人时，才通知 PetAI。
+    // 注意：必须在训练假人等脚本将 damage 清零之前，用原始 damage 判断。
+    // 训练假人(npc_training_dummy)会在 DamageTaken 中把 tmpDamage 归零，
+    // 进而同步到 damageDone，若用 damageDone 判断会让食尸鬼协助/防御模式
+    // 永远无法对训练假人触发。脚本改的是 tmpDamage，damage 入参保持原值。
+    if (damage > 0)
+    {
+        if (Player* ownerPlayer = attacker ? attacker->ToPlayer() : nullptr)
+        {
+            if (ownerPlayer != victim)
+            {
+                auto notifyOwnerDealtDamageToPetAI = [victim](Creature* controlledCreature)
+                {
+                    if (!controlledCreature || !controlledCreature->IsAIEnabled())
+                        return;
+
+                    if (PetAI* petAI = dynamic_cast<PetAI*>(controlledCreature->AI()))
+                        petAI->OwnerDealtDamage(victim);
+                };
+
+                // 某些重置/来源组合下，即使下方的 m_Controlled 迭代无法可靠到达
+                // 永久宠物，Player::GetPet() 仍可访问到它。先通知主宠物。
+                Pet* primaryPet = ownerPlayer->GetPet();
+                notifyOwnerDealtDamageToPetAI(primaryPet);
+
+                for (Unit* controlled : ownerPlayer->m_Controlled)
+                {
+                    Creature* controlledCreature = controlled->ToCreature();
+                    if (!controlledCreature)
+                        continue;
+
+                    if (primaryPet && controlledCreature->GetGUID() == primaryPet->GetGUID())
+                        continue;
+
+                    notifyOwnerDealtDamageToPetAI(controlledCreature);
+                }
+            }
         }
     }
 

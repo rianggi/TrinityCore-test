@@ -283,9 +283,11 @@ float Player::GetHealthBonusFromStamina() const
     if (GtHpPerStaEntry const* hpBase = sHpPerStaGameTable.GetRow(GetLevel()))
         ratio = hpBase->Health;
 
+    // 基础血量已由 ExpectedStat::PlayerHealth 提供（SetCreateHealth），
+    // 此处只计算额外耐力（装备/buff加成）的血量贡献
     float stamina = GetStat(STAT_STAMINA);
-
-    return stamina * ratio;
+    float baseStamina = GetCreateStat(STAT_STAMINA);
+    return std::max(stamina - baseStamina, 0.0f) * ratio;
 }
 
 Stats Player::GetPrimaryStat() const

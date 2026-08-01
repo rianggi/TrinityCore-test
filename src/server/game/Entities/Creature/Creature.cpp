@@ -1386,7 +1386,7 @@ void Creature::SetTappedBy(Unit const* unit, bool withGroup)
     if (m_tapList.size() >= CREATURE_TAPPERS_SOFT_CAP)
         return;
 
-    if (unit->GetTypeId() != TYPEID_PLAYER && !unit->IsVehicle())
+    if (unit->GetTypeId() != TYPEID_PLAYER && !unit->IsVehicle() && !unit->IsControlledByPlayer())
         return;
 
     Player* player = unit->GetCharmerOrOwnerPlayerOrPlayerItself();

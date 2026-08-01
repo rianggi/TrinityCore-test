@@ -33,6 +33,56 @@
 #include "SpellPackets.h"
 #include "World.h"
 
+namespace
+{
+    // DK食尸鬼相关常量：服务端实际spell ID与客户端显示spell ID的映射
+    uint32 constexpr NPC_DK_RISEN_GHOUL = 26125;
+
+    uint32 constexpr SPELL_DK_GHOUL_CLAW_DISPLAY = 47468;
+    uint32 constexpr SPELL_DK_GHOUL_GNAW_DISPLAY = 47481;
+    uint32 constexpr SPELL_DK_GHOUL_LEAP_DISPLAY = 47482;
+    uint32 constexpr SPELL_DK_GHOUL_HUDDLE_DISPLAY = 47484;
+
+    uint32 constexpr SPELL_DK_GHOUL_CLAW = 91776;
+    uint32 constexpr SPELL_DK_GHOUL_GNAW = 91800;
+    uint32 constexpr SPELL_DK_GHOUL_LEAP = 91809;
+    uint32 constexpr SPELL_DK_GHOUL_HUDDLE = 91838;
+
+    uint32 constexpr SPELL_DK_GHOUL_SWEEPING_CLAWS_LEGACY = 91778;
+    uint32 constexpr SPELL_DK_GHOUL_SWEEPING_CLAWS = 1278150;
+    uint32 constexpr SPELL_DK_GHOUL_MONSTROUS_BLOW = 91797;
+    uint32 constexpr SPELL_DK_GHOUL_SHAMBLING_RUSH = 91802;
+    uint32 constexpr SPELL_DK_GHOUL_SHAMBLING_RUSH_EFFECT = 91807;
+
+    // 将服务端冷却spell ID映射为客户端显示spell ID
+    // 仅对DK食尸鬼(NPC 26125)生效，其他单位原样返回
+    uint32 GetClientCooldownSpellId(Unit const* owner, uint32 spellId)
+    {
+        Creature const* creature = owner ? owner->ToCreature() : nullptr;
+        if (!creature || creature->GetEntry() != NPC_DK_RISEN_GHOUL)
+            return spellId;
+
+        switch (spellId)
+        {
+            case SPELL_DK_GHOUL_CLAW:
+            case SPELL_DK_GHOUL_SWEEPING_CLAWS_LEGACY:
+            case SPELL_DK_GHOUL_SWEEPING_CLAWS:
+                return SPELL_DK_GHOUL_CLAW_DISPLAY;
+            case SPELL_DK_GHOUL_GNAW:
+            case SPELL_DK_GHOUL_MONSTROUS_BLOW:
+                return SPELL_DK_GHOUL_GNAW_DISPLAY;
+            case SPELL_DK_GHOUL_LEAP:
+            case SPELL_DK_GHOUL_SHAMBLING_RUSH:
+            case SPELL_DK_GHOUL_SHAMBLING_RUSH_EFFECT:
+                return SPELL_DK_GHOUL_LEAP_DISPLAY;
+            case SPELL_DK_GHOUL_HUDDLE:
+                return SPELL_DK_GHOUL_HUDDLE_DISPLAY;
+            default:
+                return spellId;
+        }
+    }
+}
+
 SpellHistory::Duration const SpellHistory::InfinityCooldownDelay = Seconds(MONTH);
 
 template<>
@@ -299,7 +349,8 @@ void SpellHistory::WritePacket(WorldPackets::Spells::SendSpellHistory* sendSpell
     for (auto const& [spellId, cooldown] : _spellCooldowns)
     {
         WorldPackets::Spells::SpellHistoryEntry historyEntry;
-        historyEntry.SpellID = spellId;
+        // DK食尸鬼：将服务端spell ID映射为客户端显示spell ID
+        historyEntry.SpellID = GetClientCooldownSpellId(_owner, spellId);
         historyEntry.ItemID = cooldown.ItemId;
 
         if (cooldown.OnHold)
@@ -355,7 +406,8 @@ void SpellHistory::WritePacket(WorldPackets::Pet::PetSpells* petSpells) const
     for (auto const& [spellId, cooldown] : _spellCooldowns)
     {
         WorldPackets::Pet::PetSpellCooldown petSpellCooldown;
-        petSpellCooldown.SpellID = spellId;
+        // DK食尸鬼：将服务端spell ID映射为客户端显示spell ID
+        petSpellCooldown.SpellID = GetClientCooldownSpellId(_owner, spellId);
         petSpellCooldown.Category = cooldown.CategoryId;
 
         if (!cooldown.OnHold)
@@ -533,6 +585,11 @@ void SpellHistory::StartCooldown(SpellInfo const* spellInfo, uint32 itemId, Spel
     {
         AddCooldown(spellInfo->Id, itemId, recTime, categoryId, catrecTime, onHold);
 
+        // DK食尸鬼：将服务端spell ID映射为客户端显示spell ID
+        uint32 clientSpellId = GetClientCooldownSpellId(_owner, spellInfo->Id);
+        if (clientSpellId != spellInfo->Id)
+            needsCooldownPacket = true;
+
         if (needsCooldownPacket)
         {
             if (Player* playerOwner = GetPlayerOwner())
@@ -540,7 +597,11 @@ void SpellHistory::StartCooldown(SpellInfo const* spellInfo, uint32 itemId, Spel
                 WorldPackets::Spells::SpellCooldown spellCooldown;
                 spellCooldown.Caster = _owner->GetGUID();
                 spellCooldown.Flags = SPELL_COOLDOWN_FLAG_NONE;
-                spellCooldown.SpellCooldowns.emplace_back(spellInfo->Id, uint32(cooldown.count()));
+                // 映射后的spell ID发送实际冷却剩余时间，原spell ID发送配置冷却时长
+                uint32 packetCooldown = clientSpellId != spellInfo->Id
+                    ? uint32(duration_cast<Milliseconds>(recTime - curTime).count())
+                    : uint32(cooldown.count());
+                spellCooldown.SpellCooldowns.emplace_back(clientSpellId, packetCooldown);
                 playerOwner->SendDirectMessage(spellCooldown.Write());
             }
         }
@@ -558,13 +619,15 @@ void SpellHistory::SendCooldownEvent(SpellInfo const* spellInfo, uint32 itemId /
         auto categoryItr = _categoryCooldowns.find(category);
         if (categoryItr != _categoryCooldowns.end() && categoryItr->second->SpellId != spellInfo->Id)
         {
-            player->SendDirectMessage(WorldPackets::Spells::CooldownEvent(player != _owner, categoryItr->second->SpellId).Write());
+            player->SendDirectMessage(WorldPackets::Spells::CooldownEvent(
+                player != _owner, GetClientCooldownSpellId(_owner, categoryItr->second->SpellId)).Write());
 
             if (startCooldown)
                 StartCooldown(sSpellMgr->AssertSpellInfo(categoryItr->second->SpellId, _owner->GetMap()->GetDifficultyID()), itemId, spell);
         }
 
-        player->SendDirectMessage(WorldPackets::Spells::CooldownEvent(player != _owner, spellInfo->Id).Write());
+        player->SendDirectMessage(WorldPackets::Spells::CooldownEvent(
+            player != _owner, GetClientCooldownSpellId(_owner, spellInfo->Id)).Write());
     }
 
     // start cooldowns at server side, if any
@@ -619,7 +682,8 @@ void SpellHistory::ModifySpellCooldown(CooldownStorageType::iterator& itr, Durat
     {
         WorldPackets::Spells::ModifyCooldown modifyCooldown;
         modifyCooldown.IsPet = _owner != playerOwner;
-        modifyCooldown.SpellID = itr->second.SpellId;
+        // DK食尸鬼：将服务端spell ID映射为客户端显示spell ID
+        modifyCooldown.SpellID = GetClientCooldownSpellId(_owner, itr->second.SpellId);
         modifyCooldown.DeltaTime = duration_cast<Milliseconds>(cooldownMod).count();
         modifyCooldown.SkipCategory = withoutCategoryCooldown;
         playerOwner->SendDirectMessage(modifyCooldown.Write());
@@ -647,7 +711,8 @@ void SpellHistory::UpdateCooldownRecoveryRate(CooldownStorageType::iterator& itr
     if (Player* playerOwner = GetPlayerOwner())
     {
         WorldPackets::Spells::UpdateCooldown updateCooldown;
-        updateCooldown.SpellID = itr->second.SpellId;
+        // DK食尸鬼：将服务端spell ID映射为客户端显示spell ID
+        updateCooldown.SpellID = GetClientCooldownSpellId(_owner, itr->second.SpellId);
         updateCooldown.ModChange = modChange;
         playerOwner->SendDirectMessage(updateCooldown.Write());
     }
@@ -685,7 +750,8 @@ void SpellHistory::ResetCooldown(CooldownStorageType::iterator& itr, bool update
         {
             WorldPackets::Spells::ClearCooldown clearCooldown;
             clearCooldown.IsPet = _owner != playerOwner;
-            clearCooldown.SpellID = itr->first;
+            // DK食尸鬼：将服务端spell ID映射为客户端显示spell ID
+            clearCooldown.SpellID = GetClientCooldownSpellId(_owner, itr->first);
             clearCooldown.ClearOnHold = false;
             playerOwner->SendDirectMessage(clearCooldown.Write());
         }
@@ -829,7 +895,8 @@ void SpellHistory::LockSpellSchool(SpellSchoolMask schoolMask, Duration lockoutT
             AddCooldown(spellId, 0, lockoutEnd, 0, now);
 
         // always send cooldown, even if it will be shorter than already existing cooldown for LossOfControl UI
-        spellCooldown.SpellCooldowns.emplace_back(spellId, lockoutTime.count());
+        // DK食尸鬼：将服务端spell ID映射为客户端显示spell ID
+        spellCooldown.SpellCooldowns.emplace_back(GetClientCooldownSpellId(_owner, spellId), lockoutTime.count());
     }
 
     if (Player* player = GetPlayerOwner())
@@ -1097,9 +1164,15 @@ void SpellHistory::SendClearCooldowns(std::vector<int32> const& cooldowns) const
 {
     if (Player const* playerOwner = GetPlayerOwner())
     {
+        // DK食尸鬼：将服务端spell ID映射为客户端显示spell ID
+        std::vector<int32> mappedCooldowns;
+        mappedCooldowns.reserve(cooldowns.size());
+        for (int32 spellId : cooldowns)
+            mappedCooldowns.push_back(int32(GetClientCooldownSpellId(_owner, uint32(spellId))));
+
         WorldPackets::Spells::ClearCooldowns clearCooldowns;
         clearCooldowns.IsPet = _owner != playerOwner;
-        clearCooldowns.SpellID = cooldowns;
+        clearCooldowns.SpellID = std::move(mappedCooldowns);
         playerOwner->SendDirectMessage(clearCooldowns.Write());
     }
 }
@@ -1209,7 +1282,8 @@ void SpellHistory::RestoreCooldownStateAfterDuel()
             if (cooldownDuration <= 0 || cooldownDuration > 10 * MINUTE * IN_MILLISECONDS || cooldown.OnHold)
                 continue;
 
-            spellCooldown.SpellCooldowns.emplace_back(spellId, cooldownDuration);
+            // DK食尸鬼：将服务端spell ID映射为客户端显示spell ID
+            spellCooldown.SpellCooldowns.emplace_back(GetClientCooldownSpellId(_owner, spellId), cooldownDuration);
         }
 
         player->SendDirectMessage(spellCooldown.Write());

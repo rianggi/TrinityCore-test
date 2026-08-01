@@ -131,6 +131,23 @@ struct npc_pet_dk_risen_ghoul : public AggressorAI
     void JustAppeared() override
     {
         me->CastSpell(me, SPELL_DK_BIRTH, TRIGGERED_IGNORE_CAST_IN_PROGRESS | TRIGGERED_DONT_REPORT_CAST_ERROR);
+
+        // 召唤后立即跟随主人（AggressorAI 默认不会在空闲时跟随，只有脱离战斗后才会）
+        if (Unit* owner = me->GetOwner())
+            me->GetMotionMaster()->MoveFollow(owner, PET_FOLLOW_DIST, me->GetFollowAngle());
+    }
+
+    void UpdateAI(uint32 diff) override
+    {
+        if (!UpdateVictim())
+        {
+            // 没有战斗目标时，确保跟随主人
+            if (Unit* owner = me->GetOwner())
+            {
+                if (!me->HasUnitState(UNIT_STATE_FOLLOW))
+                    me->GetMotionMaster()->MoveFollow(owner, PET_FOLLOW_DIST, me->GetFollowAngle());
+            }
+        }
     }
 };
 

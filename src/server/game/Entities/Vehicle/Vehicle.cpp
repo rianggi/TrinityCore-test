@@ -46,6 +46,36 @@ public:
     SeatMap::iterator Seat;
 };
 
+namespace
+{
+    constexpr uint32 NPC_GRAND_EXPEDITION_YAK = 62809;
+    constexpr uint32 NPC_GRAND_EXPEDITION_YAK_TRANSMOGRIFIER = 62821;
+    constexpr uint32 NPC_GRAND_EXPEDITION_YAK_TRAVELING_TRADER = 62822;
+
+    // DK 永久食尸鬼 creature entry，与 Pet.cpp/Player.cpp/PetAI.cpp 等保持一致
+    constexpr uint32 NPC_DK_RISEN_GHOUL = 26125;
+
+    bool IsGrandExpeditionYakAccessory(uint32 vehicleEntry, uint32 accessoryEntry)
+    {
+        return vehicleEntry == NPC_GRAND_EXPEDITION_YAK &&
+            (accessoryEntry == NPC_GRAND_EXPEDITION_YAK_TRANSMOGRIFIER ||
+             accessoryEntry == NPC_GRAND_EXPEDITION_YAK_TRAVELING_TRADER);
+    }
+
+    int8 GetGrandExpeditionYakAccessorySeat(uint32 accessoryEntry)
+    {
+        switch (accessoryEntry)
+        {
+            case NPC_GRAND_EXPEDITION_YAK_TRANSMOGRIFIER:
+                return 0;
+            case NPC_GRAND_EXPEDITION_YAK_TRAVELING_TRADER:
+                return 1;
+            default:
+                return -1;
+        }
+    }
+}
+
 Vehicle::Vehicle(Unit* unit, VehicleEntry const* vehInfo, uint32 creatureEntry) :
 UsableSeatNum(0), _me(unit), _vehicleInfo(vehInfo), _creatureEntry(creatureEntry), _status(STATUS_NONE)
 {
@@ -404,6 +434,12 @@ void Vehicle::InstallAccessory(uint32 entry, int8 seatId, bool minion, uint8 typ
         return;
     }
 
+    // Grand Expedition Yak has two fixed vendor accessories. Keep the correction
+    // limited to this mount because some DB2/client combinations can lose or
+    // remap the template seat before the accessory boards the vehicle.
+    if (IsGrandExpeditionYakAccessory(GetCreatureEntry(), entry))
+        seatId = GetGrandExpeditionYakAccessorySeat(entry);
+
     TC_LOG_DEBUG("entities.vehicle", "Vehicle ({}, Entry {}): installing accessory (Entry: {}) on seat: {}",
         _me->GetGUID().ToString(), GetCreatureEntry(), entry, (int32)seatId);
 
@@ -458,7 +494,17 @@ bool Vehicle::AddVehiclePassenger(Unit* unit, int8 seatId)
     // asynchronously, so it can be cancelled easily in case the vehicle is uninstalled meanwhile.
     SeatMap::iterator seat;
     VehicleJoinEvent* e = new VehicleJoinEvent(this, unit);
-    unit->m_Events.AddEvent(e, unit->m_Events.CalculateTime(0s));
+
+    // Grand Expedition Yak vendor accessories need a short delay before the
+    // vehicle enter event is executed. Without it, the summoned vendor can
+    // remain at the spawn position on the ground instead of being attached to
+    // the vehicle seat. This is intentionally restricted to the yak vendors so
+    // normal vehicle passengers keep the original immediate boarding behavior.
+    Milliseconds joinDelay = 0ms;
+    if (IsGrandExpeditionYakAccessory(GetCreatureEntry(), unit->GetEntry()))
+        joinDelay = 50ms;
+
+    unit->m_Events.AddEvent(e, unit->m_Events.CalculateTime(joinDelay));
 
     if (seatId < 0) // no specific seat requirement
     {
@@ -815,6 +861,33 @@ bool VehicleJoinEvent::Execute(uint64, uint32)
     ASSERT(Passenger->IsInWorld());
     ASSERT(Target && Target->GetBase()->IsInWorld());
 
+    // Grand Expedition Yak vendor accessories use fixed seats. Re-resolve the
+    // seat at execution time because the enter event is delayed and the original
+    // iterator can become unsuitable if another passenger state changed meanwhile.
+    if (IsGrandExpeditionYakAccessory(Target->GetCreatureEntry(), Passenger->GetEntry()))
+    {
+        int8 fixedSeatId = GetGrandExpeditionYakAccessorySeat(Passenger->GetEntry());
+        SeatMap::iterator fixedSeat = Target->Seats.find(fixedSeatId);
+
+        if (fixedSeat == Target->Seats.end())
+        {
+            Abort(0);
+            return true;
+        }
+
+        if (!fixedSeat->second.IsEmpty() && fixedSeat->second.Passenger.Guid != Passenger->GetGUID())
+            if (Unit* oldPassenger = ObjectAccessor::GetUnit(*Target->GetBase(), fixedSeat->second.Passenger.Guid))
+                oldPassenger->ExitVehicle();
+
+        if (!fixedSeat->second.IsEmpty() && fixedSeat->second.Passenger.Guid != Passenger->GetGUID())
+        {
+            Abort(0);
+            return true;
+        }
+
+        Seat = fixedSeat;
+    }
+
     Unit::AuraEffectList const& vehicleAuras = Target->GetBase()->GetAuraEffectsByType(SPELL_AURA_CONTROL_VEHICLE);
     auto itr = std::find_if(vehicleAuras.begin(), vehicleAuras.end(), [this](AuraEffect const* aurEff) -> bool
         {
@@ -871,7 +944,15 @@ bool VehicleJoinEvent::Execute(uint64, uint32)
         player->StopCastingCharm();
         player->StopCastingBindSight();
         player->SendOnCancelExpectedVehicleRideAura();
-        if (!veSeat->HasFlag(VEHICLE_SEAT_FLAG_B_KEEP_PET))
+        // DK 食尸鬼强制暂时解散，不管座位是否带 VEHICLE_SEAT_FLAG_B_KEEP_PET 标志。
+        // 原版仅当座位不带 KEEP_PET 时才调用 UnsummonPetTemporaryIfAny，但 12.x 中大量
+        // 任务/副本载具座位带此标志，导致 DK 食尸鬼不被立即移除，而是用 MoveFollow 跟随
+        // 玩家，直到超视距后才被 Pet::Update 的距离检查移除，玩家看到的现象就是"食尸鬼
+        // 一直跟随，距离拉远才消失"。退出载具时由 Unit::_ExitVehicle 调用
+        // ResummonPetTemporaryUnSummonedIfAny 重新召唤，实现"暂时消失/重现"的预期行为。
+        Pet* pet = player->GetPet();
+        bool const isDkRisenGhoul = pet && pet->GetEntry() == NPC_DK_RISEN_GHOUL;
+        if (isDkRisenGhoul || !veSeat->HasFlag(VEHICLE_SEAT_FLAG_B_KEEP_PET))
             player->UnsummonPetTemporaryIfAny();
     }
 

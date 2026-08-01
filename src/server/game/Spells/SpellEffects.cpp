@@ -1119,6 +1119,23 @@ void Spell::EffectApplyAura()
     if (!_spellAura || _spellAura->IsRemoved() || !unitTarget)
         return;
 
+    // 1242866 - Raise Dead (modern 12.x DK spell)
+    // In current data this spell applies a dummy aura and relies on server-side
+    // script logic to create the real ghoul. Without this bridge the player gets
+    // the Raise Dead aura/state but no 26125 Risen Ghoul is created.
+    //
+    // Keep this special case narrowly limited to Death Knights and to this exact
+    // spell. The real summon is still handled by 52150, so normal pet creation,
+    // temporary/permanent pet rules, and later Pet.cpp logic remain centralized.
+    if (m_spellInfo->Id == 1242866)
+    {
+        if (Player* playerTarget = unitTarget->ToPlayer())
+        {
+            if (playerTarget->GetClass() == CLASS_DEATH_KNIGHT && !playerTarget->GetPet())
+                playerTarget->CastSpell(playerTarget, 52150, true);
+        }
+    }
+
     // register target/effect on aura
     AuraApplication* aurApp = _spellAura->GetApplicationOfTarget(unitTarget->GetGUID());
     if (!aurApp)
@@ -2703,6 +2720,9 @@ void Spell::EffectSummonPet()
             //OldSummon->SetMap(owner->GetMap());
             //owner->GetMap()->Add(OldSummon->ToCreature());
 
+            // 【召回】不重新随机名字/皮肤，保持当前样子。
+            // 只有使用亡者复生【重新召唤】（下方 SummonPet 分支）才随机。
+
             if (owner->GetTypeId() == TYPEID_PLAYER && OldSummon->isControlled())
                 owner->ToPlayer()->PetSpellInitialize();
 
@@ -2738,7 +2758,29 @@ void Spell::EffectSummonPet()
 
         pet->SetCreatedBySpell(m_spellInfo->Id);
 
-        // generate new name for summon pet
+        // 其他宠物：只有新创建时才生成名字
+        if (petentry != 26125)
+        {
+            std::string new_name = sObjectMgr->GeneratePetName(petentry);
+            if (!new_name.empty())
+                pet->SetName(new_name);
+        }
+    }
+
+    // DK亡者复生食尸鬼：每次召唤都随机皮肤和名字
+    // 无论新创建 / 从DB加载(isNew=false) / 旧宠物召回，都要重新随机
+    if (petentry == 26125)
+    {
+        // 随机皮肤：固定选择当前随机值，立即写入NativeDisplayID，避免后续被变形光环逻辑随机覆盖
+        if (CreatureTemplate const* cinfo = sObjectMgr->GetCreatureTemplate(petentry))
+        {
+            if (CreatureModel const* model = cinfo->GetRandomValidModel())
+            {
+                pet->SetDisplayId(model->CreatureDisplayID, true);
+            }
+        }
+
+        // 随机名字
         std::string new_name = sObjectMgr->GeneratePetName(petentry);
         if (!new_name.empty())
             pet->SetName(new_name);

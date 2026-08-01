@@ -38,6 +38,223 @@
 #include "PetAI.h"
 #include "Util.h"
 
+
+namespace
+{
+    // DK 永久食尸鬼（Raise Dead 永久宠物）的 Creature Entry
+    uint32 constexpr NPC_DK_RISEN_GHOUL = 26125;
+
+    // 黑暗突变识别 aura：
+    //   63560    旧版黑暗突变
+    //   1233448  12.x 黑暗突变
+    //   1235391  黑暗突变效果 aura
+    uint32 constexpr SPELL_DK_DARK_TRANSFORMATION_LEGACY = 63560;
+    uint32 constexpr SPELL_DK_DARK_TRANSFORMATION = 1233448;
+    uint32 constexpr SPELL_DK_DARK_TRANSFORMATION_EFFECT = 1235391;
+
+    // 客户端显示的食尸鬼基础技能 ID（宠物动作条图标）
+    uint32 constexpr SPELL_DK_GHOUL_CLAW_DISPLAY = 47468;
+    uint32 constexpr SPELL_DK_GHOUL_GNAW_DISPLAY = 47481;
+    uint32 constexpr SPELL_DK_GHOUL_LEAP_DISPLAY = 47482;
+    uint32 constexpr SPELL_DK_GHOUL_HUDDLE_DISPLAY = 47484;
+
+    // 服务端实际执行的食尸鬼基础技能 ID
+    uint32 constexpr SPELL_DK_GHOUL_CLAW_EXECUTION = 91776;
+    uint32 constexpr SPELL_DK_GHOUL_GNAW_EXECUTION = 91800;
+    uint32 constexpr SPELL_DK_GHOUL_LEAP_EXECUTION = 91809;
+    uint32 constexpr SPELL_DK_GHOUL_HUDDLE_EXECUTION = 91838;
+
+    // 黑暗突变后的强化技能 ID
+    uint32 constexpr SPELL_DK_GHOUL_SWEEPING_CLAWS_LEGACY = 91778;
+    uint32 constexpr SPELL_DK_GHOUL_SWEEPING_CLAWS = 1278150;
+    uint32 constexpr SPELL_DK_GHOUL_MONSTROUS_BLOW = 91797;
+    uint32 constexpr SPELL_DK_GHOUL_SHAMBLING_RUSH = 91802;
+
+    // 判断单位是否为 DK 永久食尸鬼（Creature Entry 26125）
+    bool IsRisenGhoul(Unit const* unit)
+    {
+        return unit && unit->GetTypeId() == TYPEID_UNIT && unit->GetEntry() == NPC_DK_RISEN_GHOUL;
+    }
+
+    // 获取食尸鬼自动释放技能对应的服务端执行技能 ID
+    // 仅返回允许自动释放的三个技能：爪击、撕扯、跳跃
+    uint32 GetDkGhoulAutocastExecutionSpellId(uint32 spellId)
+    {
+        switch (spellId)
+        {
+            case SPELL_DK_GHOUL_CLAW_DISPLAY:
+            case SPELL_DK_GHOUL_CLAW_EXECUTION:
+                return SPELL_DK_GHOUL_CLAW_EXECUTION;
+            case SPELL_DK_GHOUL_GNAW_DISPLAY:
+            case SPELL_DK_GHOUL_GNAW_EXECUTION:
+                return SPELL_DK_GHOUL_GNAW_EXECUTION;
+            case SPELL_DK_GHOUL_LEAP_DISPLAY:
+            case SPELL_DK_GHOUL_LEAP_EXECUTION:
+                return SPELL_DK_GHOUL_LEAP_EXECUTION;
+            default:
+                break;
+        }
+
+        return 0;
+    }
+
+    // 获取食尸鬼技能对应的服务端执行技能 ID
+    // 包含所有四个技能：爪击、撕扯、跳跃、蜷缩
+    uint32 GetDkGhoulExecutionSpellId(uint32 spellId)
+    {
+        switch (spellId)
+        {
+            case SPELL_DK_GHOUL_CLAW_DISPLAY:
+                return SPELL_DK_GHOUL_CLAW_EXECUTION;
+            case SPELL_DK_GHOUL_GNAW_DISPLAY:
+                return SPELL_DK_GHOUL_GNAW_EXECUTION;
+            case SPELL_DK_GHOUL_LEAP_DISPLAY:
+                return SPELL_DK_GHOUL_LEAP_EXECUTION;
+            case SPELL_DK_GHOUL_HUDDLE_DISPLAY:
+                return SPELL_DK_GHOUL_HUDDLE_EXECUTION;
+            default:
+                break;
+        }
+
+        return spellId;
+    }
+
+    // 获取宠物动作条上存储的技能 ID
+    // 旧的 474xx ID 仅作为输入别名接受，最终存储为 9xxxx
+    uint32 GetDkGhoulActionBarSpellId(uint32 spellId)
+    {
+        return GetDkGhoulExecutionSpellId(spellId);
+    }
+
+    // 判断技能是否为蜷缩技能
+    bool IsDkGhoulHuddleSpell(uint32 spellId)
+    {
+        return spellId == SPELL_DK_GHOUL_HUDDLE_DISPLAY ||
+            spellId == SPELL_DK_GHOUL_HUDDLE_EXECUTION;
+    }
+
+    // 判断单位是否拥有任意版本的黑暗突变 aura
+    bool HasDkDarkTransformationAura(Unit const* unit)
+    {
+        return unit &&
+            (unit->HasAura(SPELL_DK_DARK_TRANSFORMATION_LEGACY) ||
+             unit->HasAura(SPELL_DK_DARK_TRANSFORMATION) ||
+             unit->HasAura(SPELL_DK_DARK_TRANSFORMATION_EFFECT));
+    }
+
+    // 获取黑暗突变状态下对应基础技能的强化技能 ID。
+    // 仅对 DK 永久食尸鬼且处于黑暗突变状态下生效。
+    // 返回 0 表示无需替换为基础技能执行。
+    uint32 GetDkGhoulDarkTransformationOverrideSpellId(
+        Unit const* caster, uint32 baseSpellId)
+    {
+        if (!IsRisenGhoul(caster) ||
+            (!HasDkDarkTransformationAura(caster) &&
+             !HasDkDarkTransformationAura(caster->GetCharmerOrOwner())))
+            return 0;
+
+        Difficulty const difficulty = caster->GetMap()->GetDifficultyID();
+
+        switch (baseSpellId)
+        {
+            case SPELL_DK_GHOUL_CLAW_DISPLAY:
+            case SPELL_DK_GHOUL_CLAW_EXECUTION:
+                // 爪击 -> 横扫爪击（优先 1278150，缺失时回退旧版 91778）
+                if (sSpellMgr->GetSpellInfo(
+                    SPELL_DK_GHOUL_SWEEPING_CLAWS, difficulty))
+                    return SPELL_DK_GHOUL_SWEEPING_CLAWS;
+                if (sSpellMgr->GetSpellInfo(
+                    SPELL_DK_GHOUL_SWEEPING_CLAWS_LEGACY, difficulty))
+                    return SPELL_DK_GHOUL_SWEEPING_CLAWS_LEGACY;
+                break;
+            case SPELL_DK_GHOUL_GNAW_DISPLAY:
+            case SPELL_DK_GHOUL_GNAW_EXECUTION:
+                // Gnaw -> 巨兽猛击
+                if (sSpellMgr->GetSpellInfo(
+                    SPELL_DK_GHOUL_MONSTROUS_BLOW, difficulty))
+                    return SPELL_DK_GHOUL_MONSTROUS_BLOW;
+                break;
+            case SPELL_DK_GHOUL_LEAP_DISPLAY:
+            case SPELL_DK_GHOUL_LEAP_EXECUTION:
+                // Leap -> 蹒跚突袭
+                if (sSpellMgr->GetSpellInfo(
+                    SPELL_DK_GHOUL_SHAMBLING_RUSH, difficulty))
+                    return SPELL_DK_GHOUL_SHAMBLING_RUSH;
+                break;
+            default:
+                break;
+        }
+
+        return 0;
+    }
+
+    // 判断 spellId 是否为食尸鬼爪击（基础技能）
+    bool IsDkGhoulClawSpell(uint32 spellId)
+    {
+        return spellId == SPELL_DK_GHOUL_CLAW_DISPLAY ||
+            spellId == SPELL_DK_GHOUL_CLAW_EXECUTION;
+    }
+
+    // 获取基础技能的能量消耗。
+    // 黑暗突变不会让爪击免费。横扫爪击保留原本的 40 点能量需求，
+    // 即使存在法力消耗条目但报告为 0 也按 40 点处理。
+    int32 GetDkGhoulBaseSpellEnergyCost(Spell const* baseSpell)
+    {
+        if (!baseSpell)
+            return 0;
+
+        if (IsDkGhoulClawSpell(baseSpell->GetSpellInfo()->Id))
+            return 40;
+
+        return std::max<int32>(
+            0, baseSpell->GetPowerTypeCostAmount(POWER_ENERGY).value_or(0));
+    }
+
+    // 判断食尸鬼是否有足够能量施放基础技能
+    bool HasDkGhoulBaseSpellPower(Unit const* caster, Spell const* baseSpell)
+    {
+        int32 const energyCost = GetDkGhoulBaseSpellEnergyCost(baseSpell);
+        return !energyCost ||
+            int32(caster->GetPower(POWER_ENERGY)) >= energyCost;
+    }
+
+    // 手动消耗基础技能的能量（黑暗突变的强化技能会绕过正常能量处理）
+    void ConsumeDkGhoulBaseSpellPower(Unit* caster, Spell const* baseSpell)
+    {
+        int32 const energyCost = GetDkGhoulBaseSpellEnergyCost(baseSpell);
+        if (energyCost)
+            caster->ModifyPower(POWER_ENERGY, -energyCost);
+    }
+
+    // 为强化技能启动冷却：
+    //   - 若强化技能本身有恢复时间，则正常 SendCooldownEvent
+    //   - 否则强制启动 1 秒冷却避免连发
+    //   - 同时为基础技能添加 GCD
+    void StartDkGhoulOverrideCooldown(Unit* caster,
+        SpellInfo const* baseSpellInfo, SpellInfo const* overrideSpellInfo)
+    {
+        SpellHistory* spellHistory = caster->GetSpellHistory();
+
+        if (overrideSpellInfo->GetRecoveryTime() ||
+            overrideSpellInfo->CategoryRecoveryTime)
+        {
+            spellHistory->SendCooldownEvent(
+                overrideSpellInfo, 0, nullptr, true);
+        }
+        else
+        {
+            spellHistory->StartCooldown(
+                overrideSpellInfo, 0, nullptr, false, Seconds(1));
+            spellHistory->SendCooldownEvent(
+                overrideSpellInfo, 0, nullptr, false);
+        }
+
+        if (baseSpellInfo->StartRecoveryTime)
+            spellHistory->AddGlobalCooldown(
+                baseSpellInfo, Milliseconds(baseSpellInfo->StartRecoveryTime));
+    }
+}
+
 void WorldSession::HandleDismissCritter(WorldPackets::Pet::DismissCritter& packet)
 {
     Unit* pet = ObjectAccessor::GetCreatureOrPetOrVehicle(*_player, packet.CritterGUID);
@@ -166,7 +383,18 @@ void WorldSession::HandlePetActionHelper(Unit* pet, ObjectGuid guid1, uint32 spe
                     charmInfo->SaveStayPosition();
                     break;
                 case COMMAND_FOLLOW: // spellid = 1792 - FOLLOW
-                    pet->AttackStop();
+                    if (IsRisenGhoul(pet))
+                    {
+                        // 跟随只是一个宠物命令，必须停止食尸鬼当前的攻击动作并把它
+                        // 召回，但不应强制调用 CombatStop。若在此处结束战斗，目标
+                        // 可能立刻脱战，而零售端会保持战斗状态直到正常的距离/leash
+                        // 规则使其结束。
+                        charmInfo->SetIsCommandAttack(false);
+                        pet->AttackStop();
+                    }
+                    else
+                        pet->AttackStop();
+
                     pet->InterruptSpell(CURRENT_GENERIC_SPELL, false, false);
                     if (Spell const* channeledSpell = pet->GetCurrentSpell(CURRENT_CHANNELED_SPELL); channeledSpell && !channeledSpell->GetSpellInfo()->HasAttribute(SPELL_ATTR9_CHANNEL_PERSISTS_ON_PET_FOLLOW))
                         pet->InterruptSpell(CURRENT_CHANNELED_SPELL, true, true);
@@ -206,6 +434,10 @@ void WorldSession::HandlePetActionHelper(Unit* pet, ObjectGuid guid1, uint32 spe
 
                         if (pet->GetTypeId() != TYPEID_PLAYER && pet->ToCreature()->IsAIEnabled())
                         {
+                            // 手动宠物条 Attack 必须覆盖之前的守卫点命令（如 Move To 或 Stay）。
+                            // 若 COMMAND_MOVE_TO 仍处于激活状态，PetAI 可能拒绝攻击，
+                            // 导致食尸鬼卡在守卫点无法攻击。
+                            charmInfo->SetCommandState(COMMAND_ATTACK);
                             charmInfo->SetIsCommandAttack(true);
                             charmInfo->SetIsAtStay(false);
                             charmInfo->SetIsFollowing(false);
@@ -229,6 +461,8 @@ void WorldSession::HandlePetActionHelper(Unit* pet, ObjectGuid guid1, uint32 spe
                         }
                         else // charmed player
                         {
+                            // 同样为被控制/被附身的玩家宠物覆盖之前的守卫点命令。
+                            charmInfo->SetCommandState(COMMAND_ATTACK);
                             charmInfo->SetIsCommandAttack(true);
                             charmInfo->SetIsAtStay(false);
                             charmInfo->SetIsFollowing(false);
@@ -263,14 +497,18 @@ void WorldSession::HandlePetActionHelper(Unit* pet, ObjectGuid guid1, uint32 spe
                 case COMMAND_MOVE_TO:
                     pet->StopMoving();
                     pet->GetMotionMaster()->Clear();
-                    pet->GetMotionMaster()->MovePoint(0, pos);
+
+                    // Move To 是一个守卫点命令。使用宠物 GUID 作为点 id，
+                    // 这样 PetAI::MovementInform 可以标记到达事件并保存实际
+                    // 到达的位置。若在此处保存，会存储宠物旧位置而非点击点。
+                    pet->GetMotionMaster()->MovePoint(pet->GetGUID().GetCounter(), pos);
                     charmInfo->SetCommandState(COMMAND_MOVE_TO);
 
                     charmInfo->SetIsCommandAttack(false);
-                    charmInfo->SetIsAtStay(true);
+                    charmInfo->SetIsAtStay(false);
+                    charmInfo->SetIsCommandFollow(false);
                     charmInfo->SetIsFollowing(false);
-                    charmInfo->SetIsReturning(false);
-                    charmInfo->SaveStayPosition();
+                    charmInfo->SetIsReturning(true);
                     break;
                 default:
                     TC_LOG_ERROR("entities.pet", "WORLD: unknown PET flag Action {} and spellid {}.", uint32(flag), spellid);
@@ -280,12 +518,33 @@ void WorldSession::HandlePetActionHelper(Unit* pet, ObjectGuid guid1, uint32 spe
             switch (spellid)
             {
                 case REACT_PASSIVE: // passive
-                    pet->AttackStop();
+                    if (IsRisenGhoul(pet))
+                    {
+                        // 被动只取消食尸鬼的攻击意图。此处不应调用 CombatStop：
+                        // 若食尸鬼或其主人仍在怪物的威胁/战斗列表中，怪物应保持
+                        // 战斗状态直到正常的距离/leash 规则使其结束。
+                        charmInfo->SetIsCommandAttack(false);
+                        pet->AttackStop();
+                    }
+                    else
+                        pet->AttackStop();
                     [[fallthrough]];
                 case REACT_DEFENSIVE: // recovery
                 case REACT_AGGRESSIVE: // activete
+                case REACT_ASSIST:     // assist
                     if (pet->GetTypeId() == TYPEID_UNIT)
+                    {
                         pet->ToCreature()->SetReactState(ReactStates(spellid));
+                        // 官服：玩家在食尸鬼召回状态下切换协助/防御/攻击反应时，
+                        // 召回命令被打破，食尸鬼重新协助玩家。
+                        if (IsRisenGhoul(pet))
+                        {
+                            charmInfo->SetIsCommandFollow(false);
+                            charmInfo->SetIsReturning(false);
+                            charmInfo->SetIsFollowing(true);
+                            charmInfo->SetCommandState(COMMAND_FOLLOW);
+                        }
+                    }
                     break;
             }
             break;
@@ -496,13 +755,34 @@ void WorldSession::HandlePetSetAction(WorldPackets::Pet::PetSetAction& packet)
 
     for (Unit* petControlled : pets)
     {
-        //if it's act for spell (en/disable/cast) and there is a spell given (0 = remove spell) which pet doesn't know, don't add
-        if (!((act_state == ACT_ENABLED || act_state == ACT_DISABLED || act_state == ACT_PASSIVE) && spell_id && !petControlled->HasSpell(spell_id)))
+        ActiveStates finalActState = ActiveStates(act_state);
+        uint32 actionBarSpellId = spell_id;
+        uint32 autocastSpellId = spell_id;
+
+        if (IsRisenGhoul(petControlled))
         {
-            if (SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spell_id, petControlled->GetMap()->GetDifficultyID()))
+            // DK 食尸鬼：宠物栏存储 9xxxx 执行技能 ID
+            actionBarSpellId = GetDkGhoulActionBarSpellId(spell_id);
+
+            // 自动释放使用对应的执行技能 ID
+            if (uint32 ghoulAutocastSpellId = GetDkGhoulAutocastExecutionSpellId(spell_id))
+                autocastSpellId = ghoulAutocastSpellId;
+            else
+                autocastSpellId = actionBarSpellId;
+
+            // 蜷缩是手动技能，不允许自动释放，强制保持 ACT_PASSIVE
+            if (IsDkGhoulHuddleSpell(actionBarSpellId) && (act_state == ACT_ENABLED || act_state == ACT_DISABLED))
+                finalActState = ACT_PASSIVE;
+        }
+
+        // 如果是技能动作（开启/关闭/被动）且有技能 ID 但宠物未学习该技能，则不添加
+        uint32 knownSpellId = IsRisenGhoul(petControlled) ? actionBarSpellId : spell_id;
+        if (!((act_state == ACT_ENABLED || act_state == ACT_DISABLED || act_state == ACT_PASSIVE) && spell_id && !petControlled->HasSpell(knownSpellId)))
+        {
+            if (SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(autocastSpellId, petControlled->GetMap()->GetDifficultyID()))
             {
-                //sign for autocast
-                if (act_state == ACT_ENABLED)
+                // 开启自动释放
+                if (finalActState == ACT_ENABLED)
                 {
                     if (petControlled->GetTypeId() == TYPEID_UNIT && petControlled->IsPet())
                         ((Pet*)petControlled)->ToggleAutocast(spellInfo, true);
@@ -511,8 +791,8 @@ void WorldSession::HandlePetSetAction(WorldPackets::Pet::PetSetAction& packet)
                             if ((*itr)->GetEntry() == petControlled->GetEntry())
                                 (*itr)->GetCharmInfo()->ToggleCreatureAutocast(spellInfo, true);
                 }
-                //sign for no/turn off autocast
-                else if (act_state == ACT_DISABLED)
+                // 关闭自动释放
+                else if (finalActState == ACT_DISABLED)
                 {
                     if (petControlled->GetTypeId() == TYPEID_UNIT && petControlled->IsPet())
                         ((Pet*)petControlled)->ToggleAutocast(spellInfo, false);
@@ -523,7 +803,13 @@ void WorldSession::HandlePetSetAction(WorldPackets::Pet::PetSetAction& packet)
                 }
             }
 
-            charmInfo->SetActionBar(position, spell_id, ActiveStates(act_state));
+            charmInfo->SetActionBar(position, actionBarSpellId, finalActState);
+
+            // 立即保存永久食尸鬼的动作栏修改。
+            // 不保存的话，替换 Move To 为 Stay 或移动食尸鬼技能等操作可能在重新登录/召唤时丢失。
+            if (Pet* controlledPet = petControlled->ToPet())
+                if (controlledPet->IsPermanentPetFor(_player))
+                    controlledPet->SavePetToDB(PET_SAVE_AS_CURRENT);
         }
     }
 }
@@ -660,8 +946,35 @@ void WorldSession::HandlePetSpellAutocastOpcode(WorldPackets::Pet::PetSpellAutoc
 
     for (Unit* petControlled : pets)
     {
-        // do not add not learned spells/ passive spells
-        if (!petControlled->HasSpell(packet.SpellID) || !spellInfo->IsAutocastable())
+        uint32 autocastSpellId = packet.SpellID;
+        uint32 actionBarSpellId = packet.SpellID;
+        bool ghoulAutocastAlias = false;
+
+        if (IsRisenGhoul(petControlled))
+        {
+            if (uint32 ghoulAutocastSpellId = GetDkGhoulAutocastExecutionSpellId(packet.SpellID))
+            {
+                // 自动释放使用服务端执行技能 ID
+                autocastSpellId = ghoulAutocastSpellId;
+                actionBarSpellId = GetDkGhoulActionBarSpellId(packet.SpellID);
+                ghoulAutocastAlias = true;
+            }
+            else if (IsDkGhoulHuddleSpell(packet.SpellID))
+                return; // 蜷缩是纯手动技能，不允许自动释放
+        }
+
+        SpellInfo const* autocastSpellInfo = autocastSpellId == spellInfo->Id
+            ? spellInfo
+            : sSpellMgr->GetSpellInfo(autocastSpellId, petControlled->GetMap()->GetDifficultyID());
+
+        SpellInfo const* actionBarSpellInfo = actionBarSpellId == spellInfo->Id
+            ? spellInfo
+            : sSpellMgr->GetSpellInfo(actionBarSpellId, petControlled->GetMap()->GetDifficultyID());
+
+        // 不添加未学习的技能/被动技能
+        if (!autocastSpellInfo || !actionBarSpellInfo ||
+            (!petControlled->HasSpell(packet.SpellID) && !petControlled->HasSpell(autocastSpellId)) ||
+            (!ghoulAutocastAlias && !spellInfo->IsAutocastable()))
             return;
 
         CharmInfo* charmInfo = petControlled->GetCharmInfo();
@@ -672,11 +985,11 @@ void WorldSession::HandlePetSpellAutocastOpcode(WorldPackets::Pet::PetSpellAutoc
         }
 
         if (petControlled->IsPet())
-            petControlled->ToPet()->ToggleAutocast(spellInfo, packet.AutocastEnabled);
+            petControlled->ToPet()->ToggleAutocast(autocastSpellInfo, packet.AutocastEnabled);
         else
-            charmInfo->ToggleCreatureAutocast(spellInfo, packet.AutocastEnabled);
+            charmInfo->ToggleCreatureAutocast(autocastSpellInfo, packet.AutocastEnabled);
 
-        charmInfo->SetSpellAutocast(spellInfo, packet.AutocastEnabled);
+        charmInfo->SetSpellAutocast(actionBarSpellInfo, packet.AutocastEnabled);
     }
 }
 
@@ -708,16 +1021,47 @@ void WorldSession::HandlePetCastSpellOpcode(WorldPackets::Spells::PetCastSpell& 
 
     TriggerCastFlags triggerCastFlags = TRIGGERED_NONE;
 
+    // DK 食尸鬼技能 ID 映射：客户端发送的 474xx 显示 ID 映射为 9xxxx 执行 ID
+    if (IsRisenGhoul(caster))
+    {
+        uint32 const executionSpellId = GetDkGhoulExecutionSpellId(spellInfo->Id);
+        if (executionSpellId != spellInfo->Id)
+            if (SpellInfo const* executionSpellInfo = sSpellMgr->GetSpellInfo(executionSpellId, caster->GetMap()->GetDifficultyID()))
+                spellInfo = executionSpellInfo;
+    }
+
     if (spellInfo->IsPassive())
         return;
 
-    // cast only learned spells
+    // 仅施放已学习的技能
     if (!caster->HasSpell(spellInfo->Id))
     {
         bool allow = false;
 
-        // allow casting of spells triggered by clientside periodic trigger auras
-        if (caster->HasAuraTypeWithTriggerSpell(SPELL_AURA_PERIODIC_TRIGGER_SPELL_FROM_CLIENT, spellInfo->Id))
+        // DK 食尸鬼特殊处理：执行技能 ID 通过对应的显示技能 ID 来判断是否已学习
+        if (IsRisenGhoul(caster))
+        {
+            switch (spellInfo->Id)
+            {
+                case SPELL_DK_GHOUL_CLAW_EXECUTION:
+                    allow = caster->HasSpell(SPELL_DK_GHOUL_CLAW_DISPLAY);
+                    break;
+                case SPELL_DK_GHOUL_GNAW_EXECUTION:
+                    allow = caster->HasSpell(SPELL_DK_GHOUL_GNAW_DISPLAY);
+                    break;
+                case SPELL_DK_GHOUL_LEAP_EXECUTION:
+                    allow = caster->HasSpell(SPELL_DK_GHOUL_LEAP_DISPLAY);
+                    break;
+                case SPELL_DK_GHOUL_HUDDLE_EXECUTION:
+                    allow = caster->HasSpell(SPELL_DK_GHOUL_HUDDLE_DISPLAY);
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        // 允许施放由客户端周期性触发光环触发的技能
+        if (!allow && caster->HasAuraTypeWithTriggerSpell(SPELL_AURA_PERIODIC_TRIGGER_SPELL_FROM_CLIENT, spellInfo->Id))
         {
             allow = true;
             triggerCastFlags = TRIGGERED_FULL_MASK;
@@ -739,6 +1083,104 @@ void WorldSession::HandlePetCastSpellOpcode(WorldPackets::Spells::PetCastSpell& 
 
     if (result == SPELL_CAST_OK)
     {
+        // DK 食尸鬼黑暗突变手动技能替换：
+        // 玩家点击 474xx 基础技能图标时，若食尸鬼处于黑暗突变状态，
+        // 则将其替换为对应的强化技能（横扫爪击/巨兽猛击/蹒跚突袭）。
+        // 强化技能检查成功后执行，成功后不再执行基础技能，
+        // 使用原客户端 CastID 回包，手动处理能量和冷却。
+        uint32 const overrideSpellId =
+            GetDkGhoulDarkTransformationOverrideSpellId(
+                caster, spellInfo->Id);
+
+        if (overrideSpellId)
+        {
+            SpellInfo const* overrideSpellInfo = sSpellMgr->GetSpellInfo(
+                overrideSpellId, caster->GetMap()->GetDifficultyID());
+
+            // 强化技能冷却未就绪时直接失败
+            if (overrideSpellInfo &&
+                !caster->GetSpellHistory()->IsReady(overrideSpellInfo))
+            {
+                spell->SendPetCastResult(SPELL_FAILED_NOT_READY);
+                spell->finish(SPELL_FAILED_NOT_READY);
+                delete spell;
+                return;
+            }
+
+            // 触发的变身强化技能会绕过正常的能量处理逻辑。
+            // 这里显式保留基础技能的能量需求（爪击/横扫爪击需 40 点能量）。
+            if (overrideSpellInfo &&
+                !HasDkGhoulBaseSpellPower(caster, spell))
+            {
+                spell->SendPetCastResult(SPELL_FAILED_NO_POWER);
+                spell->finish(SPELL_FAILED_NO_POWER);
+                delete spell;
+                return;
+            }
+
+            if (overrideSpellInfo)
+            {
+                Unit* unitTarget = spell->m_targets.GetUnitTarget();
+                if (unitTarget)
+                {
+                    Spell* overrideSpell = new Spell(
+                        caster, overrideSpellInfo, TRIGGERED_FULL_MASK);
+                    overrideSpell->m_fromClient = true;
+                    std::ranges::copy(
+                        petCastSpell.Cast.Misc,
+                        std::ranges::begin(overrideSpell->m_misc.Raw.Data));
+                    overrideSpell->InitExplicitTargets(targets);
+
+                    SpellCastResult const overrideResult =
+                        overrideSpell->CheckPetCast(unitTarget);
+
+                    if (overrideResult == SPELL_CAST_OK)
+                    {
+                        // 强化技能施放成功，发送宠物动作音效
+                        if (Creature* creature = caster->ToCreature())
+                        {
+                            if (Pet* pet = creature->ToPet())
+                            {
+                                if (pet->getPetType() == SUMMON_PET &&
+                                    (urand(0, 100) < 10))
+                                {
+                                    pet->SendPetTalk(
+                                        PET_TALK_SPECIAL_SPELL);
+                                }
+                                else
+                                    pet->SendPetAIReaction(
+                                        petCastSpell.PetGUID);
+                            }
+                        }
+
+                        // 使用原客户端 CastID 回包，让客户端正确显示施法条
+                        WorldPackets::Spells::SpellPrepare spellPrepare;
+                        spellPrepare.ClientCastID =
+                            petCastSpell.Cast.CastID;
+                        spellPrepare.ServerCastID =
+                            overrideSpell->m_castId;
+                        SendPacket(spellPrepare.Write());
+
+                        overrideSpell->prepare(targets);
+
+                        // 手动消耗基础技能能量并启动强化技能冷却
+                        ConsumeDkGhoulBaseSpellPower(caster, spell);
+                        StartDkGhoulOverrideCooldown(
+                            caster, spellInfo, overrideSpellInfo);
+
+                        // 基础技能不再执行
+                        spell->finish(SPELL_CAST_OK);
+                        delete spell;
+                        return;
+                    }
+
+                    delete overrideSpell;
+                    // 若强化技能由于数据或目标差异无法施放，
+                    // 安全地继续执行基础技能。
+                }
+            }
+        }
+
         if (Creature* creature = caster->ToCreature())
         {
             if (Pet* pet = creature->ToPet())

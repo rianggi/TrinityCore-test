@@ -2272,7 +2272,10 @@ uint32 Item::GetItemLevel(Player const* owner) const
     uint32 azeriteLevel = 0;
     if (AzeriteItem const* azeriteItem = ToAzeriteItem())
         azeriteLevel = azeriteItem->GetEffectiveLevel();
-    return Item::GetItemLevel(itemTemplate, _bonusData, owner->GetLevel(), GetModifier(ITEM_MODIFIER_TIMEWALKER_LEVEL),
+    uint32 level = owner->GetLevel();
+    if (!sDB2Manager.GetHeirloomByItemId(GetEntry()))
+        level = _bonusData.RequiredLevel;
+    return Item::GetItemLevel(itemTemplate, _bonusData, level, GetModifier(ITEM_MODIFIER_TIMEWALKER_LEVEL),
         minItemLevel, minItemLevelCutoff, maxItemLevel, pvpBonus, azeriteLevel);
 }
 
@@ -2301,7 +2304,22 @@ uint32 Item::GetItemLevel(ItemTemplate const* itemTemplate, BonusData const& bon
         itemLevel += bonusData.ItemLevelBonus;
     }
     else
-        itemLevel = bonusData.ItemLevelOffset + uint32(std::round(sDB2Manager.GetCurveValueAt(bonusData.ItemLevelOffsetCurveId, bonusData.ItemLevelOffsetItemLevel)));
+    {
+        uint32 itemLevelOffsetInput = bonusData.ItemLevelOffsetItemLevel;
+
+        // 12.x scaling-config bonuses can store ItemLevelOffsetItemLevel as 0
+        // to indicate that the offset curve should use the runtime scaling
+        // context instead of a literal level 0 input.
+        //
+        // Evaluating the offset curve at x = 0 collapses scaled starter/quest
+        // gear such as DK starting equipment with bonus list 13617 to item
+        // level 1, which makes item stats round to 0.  Prefer fixedLevel when
+        // present because fixed-scaling contexts override the owner level.
+        if (!itemLevelOffsetInput)
+            itemLevelOffsetInput = fixedLevel ? fixedLevel : level;
+
+        itemLevel = bonusData.ItemLevelOffset + uint32(std::round(sDB2Manager.GetCurveValueAt(bonusData.ItemLevelOffsetCurveId, itemLevelOffsetInput)));
+    }
 
     for (uint32 i = 0; i < MAX_ITEM_PROTO_SOCKETS; ++i)
         itemLevel += bonusData.GemItemLevelBonus[i];
@@ -2849,10 +2867,15 @@ void Item::GiveArtifactXp(uint64 amount, Item* sourceItem, uint32 artifactCatego
 
 void Item::SetFixedLevel(uint8 level)
 {
-    if (!_bonusData.HasFixedLevel || GetModifier(ITEM_MODIFIER_TIMEWALKER_LEVEL))
+    if (GetModifier(ITEM_MODIFIER_TIMEWALKER_LEVEL))
         return;
 
-    if (_bonusData.PlayerLevelToItemLevelCurveId)
+    // 传家宝不设置固定等级，继续随玩家等级缩放
+    if (sDB2Manager.GetHeirloomByItemId(GetEntry()))
+        return;
+
+    // 12.x 物品可能使用 ItemLevelOffsetCurveId 或 PlayerLevelToItemLevelCurveId，都需要固定等级
+    if (_bonusData.PlayerLevelToItemLevelCurveId || _bonusData.ItemLevelOffsetCurveId)
     {
         if (Optional<ContentTuningLevels> levels = sDB2Manager.GetContentTuningData(_bonusData.ContentTuningId, {}, true))
             level = std::min(std::max(int16(level), levels->MinLevel), levels->MaxLevel);

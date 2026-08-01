@@ -158,6 +158,7 @@ class TC_GAME_API Pet final : public Guardian
         uint16 m_petSpecialization;
 
     private:
+        void NormalizeRisenGhoulSpellsAndActionBar();
         void SaveToDB(uint32, std::vector<Difficulty> const&) override              // override of Creature::SaveToDB     - must not be called
         {
             ABORT();

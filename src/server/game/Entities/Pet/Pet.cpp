@@ -43,6 +43,80 @@
 
 #define PET_XP_FACTOR 0.05f
 
+namespace
+{
+    uint32 constexpr NPC_DK_RISEN_GHOUL = 26125;
+    uint32 constexpr CHR_SPEC_DEATH_KNIGHT_UNHOLY = 252;
+
+    // DK食尸鬼客户端显示技能ID（474xx系列，用于法术书/动作栏显示）
+    uint32 constexpr SPELL_DK_GHOUL_CLAW_DISPLAY = 47468;
+    uint32 constexpr SPELL_DK_GHOUL_GNAW_DISPLAY = 47481;
+    uint32 constexpr SPELL_DK_GHOUL_LEAP_DISPLAY = 47482;
+    uint32 constexpr SPELL_DK_GHOUL_HUDDLE_DISPLAY = 47484;
+
+    // DK食尸鬼服务器执行技能ID（91xxx系列，实际施法使用）
+    uint32 constexpr SPELL_DK_GHOUL_CLAW = 91776;
+    uint32 constexpr SPELL_DK_GHOUL_GNAW = 91800;
+    uint32 constexpr SPELL_DK_GHOUL_SHAMBLING_RUSH = 91802;
+    uint32 constexpr SPELL_DK_GHOUL_LEAP = 91809;
+    uint32 constexpr SPELL_DK_GHOUL_HUDDLE = 91838;
+
+    // 食尸鬼显示ID与执行ID的配对表，用于双ID映射
+    struct GhoulSpellPair
+    {
+        uint32 DisplaySpellId;
+        uint32 ExecutionSpellId;
+        ActiveStates DefaultExecutionState;
+        bool SupportsAutocast;
+    };
+
+    GhoulSpellPair constexpr GhoulSpellPairs[] =
+    {
+        { SPELL_DK_GHOUL_CLAW_DISPLAY, SPELL_DK_GHOUL_CLAW, ACT_ENABLED, true },
+        { SPELL_DK_GHOUL_GNAW_DISPLAY, SPELL_DK_GHOUL_GNAW, ACT_ENABLED, true },
+        { SPELL_DK_GHOUL_LEAP_DISPLAY, SPELL_DK_GHOUL_LEAP, ACT_ENABLED, true },
+        { SPELL_DK_GHOUL_HUDDLE_DISPLAY, SPELL_DK_GHOUL_HUDDLE, ACT_PASSIVE, false }
+    };
+    uint8 constexpr GHOUL_SPELL_PAIR_COUNT = sizeof(GhoulSpellPairs) / sizeof(GhoulSpellPair);
+
+    // 根据显示ID查找对应的执行ID，找不到则原样返回
+    uint32 GetGhoulExecutionSpellId(uint32 spellId)
+    {
+        for (GhoulSpellPair const& spellPair : GhoulSpellPairs)
+            if (spellPair.DisplaySpellId == spellId)
+                return spellPair.ExecutionSpellId;
+
+        return spellId;
+    }
+
+    // 判断指定spellId是否为食尸鬼执行技能ID（91xxx系列）
+    bool IsGhoulExecutionSpellId(uint32 spellId)
+    {
+        for (GhoulSpellPair const& spellPair : GhoulSpellPairs)
+            if (spellPair.ExecutionSpellId == spellId)
+                return true;
+
+        return false;
+    }
+
+    // 判断指定spellId是否为食尸鬼可自动施法的执行技能ID
+    bool IsGhoulAutocastExecutionSpellId(uint32 spellId)
+    {
+        for (GhoulSpellPair const& spellPair : GhoulSpellPairs)
+            if (spellPair.SupportsAutocast && spellPair.ExecutionSpellId == spellId)
+                return true;
+
+        return false;
+    }
+
+    // 判断是否应该抑制食尸鬼学习技能的提示
+    bool ShouldSuppressGhoulLearnedSpellToast(Pet const* pet)
+    {
+        Player* owner = pet ? pet->GetOwner() : nullptr;
+        return pet && owner && pet->GetEntry() == NPC_DK_RISEN_GHOUL && pet->IsPermanentPetFor(owner);
+    }
+}
+
 Pet::Pet(Player* owner, PetType type) :
     Guardian(nullptr, owner, true), m_removed(false),
     m_petType(type), m_duration(0), m_loading(false), m_groupUpdateMask(0),
@@ -322,11 +396,22 @@ bool Pet::LoadPetFromDB(Player* owner, uint32 petEntry, uint32 petnumber, bool c
         return false;
     }
 
-    SetReactState(petInfo->ReactState);
+    bool const isRisenGhoul = GetEntry() == NPC_DK_RISEN_GHOUL;
+    SetReactState(isRisenGhoul ? REACT_ASSIST : petInfo->ReactState);
     SetCanModifyStats(true);
 
-    if (getPetType() == SUMMON_PET && !current)              //all (?) summon pets come with full health when called, but not when they are current
-        SetFullPower(POWER_MANA);
+    if (isRisenGhoul)
+    {
+        SetPowerType(POWER_ENERGY);
+        SetMaxPower(POWER_ENERGY, 100);
+        SetPower(POWER_ENERGY, 100);
+    }
+
+    if (getPetType() == SUMMON_PET && !current)              // all (?) summon pets come with full health when called, but not when they are current
+    {
+        if (!isRisenGhoul)
+            SetFullPower(POWER_MANA);
+    }
     else
     {
         uint32 savedhealth = petInfo->Health;
@@ -336,7 +421,8 @@ bool Pet::LoadPetFromDB(Player* owner, uint32 petEntry, uint32 petnumber, bool c
         else
         {
             SetHealth(savedhealth);
-            SetPower(POWER_MANA, savedmana);
+            if (!isRisenGhoul)
+                SetPower(POWER_MANA, savedmana);
         }
     }
 
@@ -416,11 +502,22 @@ bool Pet::LoadPetFromDB(Player* owner, uint32 petEntry, uint32 petnumber, bool c
 
         SetSpecialization(specId);
 
+        bool const normalizeRisenGhoul =
+            !isTemporarySummon && GetEntry() == NPC_DK_RISEN_GHOUL && IsPermanentPetFor(owner);
+        if (normalizeRisenGhoul)
+            NormalizeRisenGhoulSpellsAndActionBar();
+
         // The SetSpecialization function will run these functions if the pet's spec is not 0
         if (!GetSpecialization())
         {
             CleanupActionBar();                                     // remove unknown spells from action bar after load
 
+            owner->PetSpellInitialize();
+        }
+        else if (normalizeRisenGhoul)
+        {
+            // SetSpecialization sends the pet spell packet before ghoul aliases are normalized.
+            // Send the final client-facing action bar after the dual-ID mapping is restored.
             owner->PetSpellInitialize();
         }
 
@@ -1085,7 +1182,15 @@ bool Guardian::InitStatsForLevel(uint8 petlevel)
     UpdateAllStats();
 
     SetFullHealth();
-    SetFullPower(POWER_MANA);
+    if (GetEntry() == NPC_DK_RISEN_GHOUL)
+    {
+        SetPowerType(POWER_ENERGY);
+        SetMaxPower(POWER_ENERGY, 100);
+        SetPower(POWER_ENERGY, 100);
+    }
+    else
+        SetFullPower(POWER_MANA);
+
     return true;
 }
 
@@ -1458,9 +1563,16 @@ bool Pet::learnSpell(uint32 spell_id)
 
     if (!m_loading)
     {
-        WorldPackets::Pet::PetLearnedSpells packet;
-        packet.Spells.push_back(spell_id);
-        GetOwner()->SendDirectMessage(packet.Write());
+        // 复活的食尸鬼每次召唤/加载时都会从双ID技能设置中重建。
+        // 不要为这些静态宠物技能发送PetLearnedSpells，否则客户端会将整个宠物法术书标记为新学习，
+        // 并在每个图标周围保持"新技能"闪光效果。
+        if (!ShouldSuppressGhoulLearnedSpellToast(this))
+        {
+            WorldPackets::Pet::PetLearnedSpells packet;
+            packet.Spells.push_back(spell_id);
+            GetOwner()->SendDirectMessage(packet.Write());
+        }
+
         GetOwner()->PetSpellInitialize();
     }
     return true;
@@ -1479,7 +1591,12 @@ void Pet::learnSpells(std::vector<uint32> const& spellIds)
     }
 
     if (!m_loading)
-        GetOwner()->GetSession()->SendPacket(packet.Write());
+    {
+        if (!ShouldSuppressGhoulLearnedSpellToast(this))
+            GetOwner()->GetSession()->SendPacket(packet.Write());
+
+        GetOwner()->PetSpellInitialize();
+    }
 }
 
 void Pet::InitLevelupSpellsForLevel()
@@ -1547,7 +1664,12 @@ void Pet::unlearnSpells(std::vector<uint32> const& spellIds, bool learn_prev, bo
     }
 
     if (!m_loading)
-        GetOwner()->GetSession()->SendPacket(packet.Write());
+    {
+        if (!ShouldSuppressGhoulLearnedSpellToast(this))
+            GetOwner()->GetSession()->SendPacket(packet.Write());
+
+        GetOwner()->PetSpellInitialize();
+    }
 }
 
 bool Pet::removeSpell(uint32 spell_id, bool learn_prev, bool clear_ab)
@@ -1594,7 +1716,11 @@ void Pet::CleanupActionBar()
                     m_charmInfo->SetActionBar(i, 0, ACT_PASSIVE);
                 else if (ab->GetType() == ACT_ENABLED)
                 {
-                    if (SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(ab->GetAction(), DIFFICULTY_NONE))
+                    uint32 autocastSpellId = ab->GetAction();
+                    if (GetEntry() == NPC_DK_RISEN_GHOUL)
+                        autocastSpellId = GetGhoulExecutionSpellId(autocastSpellId);
+
+                    if (SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(autocastSpellId, DIFFICULTY_NONE))
                         ToggleAutocast(spellInfo, true);
                 }
             }
@@ -1607,15 +1733,222 @@ void Pet::InitPetCreateSpells()
 
     LearnPetPassives();
     InitLevelupSpellsForLevel();
+    NormalizeRisenGhoulSpellsAndActionBar();
 
     CastPetAuras(false);
+}
+
+void Pet::NormalizeRisenGhoulSpellsAndActionBar()
+{
+    Player* owner = GetOwner();
+    if (GetEntry() != NPC_DK_RISEN_GHOUL || !owner || !IsPermanentPetFor(owner) || !m_charmInfo)
+        return;
+
+    SetPowerType(POWER_ENERGY);
+    SetMaxPower(POWER_ENERGY, 100);
+    SetPower(POWER_ENERGY, 100);
+    auto setStoredActiveState = [this](uint32 spellId, ActiveStates state)
+    {
+        PetSpellMap::iterator itr = m_spells.find(spellId);
+        if (itr == m_spells.end() || itr->second.state == PETSPELL_REMOVED || itr->second.active == state)
+            return;
+
+        itr->second.active = state;
+        if (itr->second.state != PETSPELL_NEW)
+            itr->second.state = PETSPELL_CHANGED;
+    };
+
+    auto removeFromAutocastList = [this](uint32 spellId)
+    {
+        m_autospells.erase(std::remove(m_autospells.begin(), m_autospells.end(), spellId), m_autospells.end());
+    };
+
+    // Shambling Rush不是普通Risen Ghoul技能。Leap真正的执行技能是91809，必须保留。
+    removeFromAutocastList(SPELL_DK_GHOUL_SHAMBLING_RUSH);
+    removeSpell(SPELL_DK_GHOUL_SHAMBLING_RUSH, false, false);
+
+    for (GhoulSpellPair const& spellPair : GhoulSpellPairs)
+    {
+        // 现代Risen Ghoul动作栏和法术书使用9xxxx宠物技能。
+        // 旧的474xx ID仅作为数据包处理程序中的兼容性别名保留；
+        // 不要将它们作为已学习的宠物技能保留，否则客户端可能会看到
+        // 同一按钮有两种不同的技能身份，并使宠物法术书保持闪烁/新技能状态。
+        removeFromAutocastList(spellPair.DisplaySpellId);
+        removeSpell(spellPair.DisplaySpellId, false, false);
+
+        if (!HasSpell(spellPair.ExecutionSpellId))
+            addSpell(spellPair.ExecutionSpellId, spellPair.DefaultExecutionState, PETSPELL_UNCHANGED);
+
+        PetSpellMap::iterator executionItr = m_spells.find(spellPair.ExecutionSpellId);
+        if (executionItr != m_spells.end() && executionItr->second.state != PETSPELL_REMOVED)
+        {
+            if (spellPair.SupportsAutocast)
+            {
+                if (executionItr->second.active != ACT_ENABLED && executionItr->second.active != ACT_DISABLED)
+                    setStoredActiveState(spellPair.ExecutionSpellId, spellPair.DefaultExecutionState);
+            }
+            else
+            {
+                // 蜷缩是手动宠物技能。永远不要将其持久化为可自动施法。
+                removeFromAutocastList(spellPair.ExecutionSpellId);
+                setStoredActiveState(spellPair.ExecutionSpellId, ACT_PASSIVE);
+            }
+
+            SpellInfo const* executionSpellInfo = sSpellMgr->GetSpellInfo(spellPair.ExecutionSpellId, DIFFICULTY_NONE);
+            if (executionSpellInfo)
+                ToggleAutocast(executionSpellInfo, executionItr->second.active == ACT_ENABLED);
+        }
+    }
+
+    auto getExecutionSpellId = [](uint32 spellId) -> uint32
+    {
+        for (GhoulSpellPair const& spellPair : GhoulSpellPairs)
+            if (spellPair.DisplaySpellId == spellId || spellPair.ExecutionSpellId == spellId)
+                return spellPair.ExecutionSpellId;
+
+        return spellId;
+    };
+
+    auto getActionState = [this](GhoulSpellPair const& spellPair) -> ActiveStates
+    {
+        if (!spellPair.SupportsAutocast)
+            return ACT_PASSIVE;
+
+        PetSpellMap::const_iterator executionItr = m_spells.find(spellPair.ExecutionSpellId);
+        if (executionItr != m_spells.end() && executionItr->second.state != PETSPELL_REMOVED &&
+            executionItr->second.active == ACT_ENABLED)
+            return ACT_ENABLED;
+
+        return ACT_DISABLED;
+    };
+
+    bool hasAnySavedAction = false;
+    for (uint8 i = 0; i < MAX_UNIT_ACTION_BAR_INDEX; ++i)
+    {
+        UnitActionBarEntry const* actionBarEntry = m_charmInfo->GetActionBarEntry(i);
+        if (actionBarEntry && actionBarEntry->GetAction())
+        {
+            hasAnySavedAction = true;
+            break;
+        }
+    }
+
+    // 首先将旧的474xx食尸鬼技能按钮迁移到可用的现代9xxxx技能ID。
+    // 这保留了有效的玩家布局，同时消除了损坏的混合ID动作栏状态。
+    for (uint8 i = 0; i < MAX_UNIT_ACTION_BAR_INDEX; ++i)
+    {
+        UnitActionBarEntry const* actionBarEntry = m_charmInfo->GetActionBarEntry(i);
+        if (!actionBarEntry || !actionBarEntry->GetAction() || !actionBarEntry->IsActionBarForSpell())
+            continue;
+
+        uint32 const oldAction = actionBarEntry->GetAction();
+        uint32 const newAction = getExecutionSpellId(oldAction);
+        if (newAction == oldAction)
+            continue;
+
+        ActiveStates state = ActiveStates(actionBarEntry->GetType());
+        for (GhoulSpellPair const& spellPair : GhoulSpellPairs)
+        {
+            if (newAction == spellPair.ExecutionSpellId)
+            {
+                if (!spellPair.SupportsAutocast)
+                    state = ACT_PASSIVE;
+
+                m_charmInfo->SetActionBar(i, newAction, state);
+                break;
+            }
+        }
+    }
+
+    auto hasActionBarSpell = [this](uint32 spellId) -> bool
+    {
+        for (uint8 i = 0; i < MAX_UNIT_ACTION_BAR_INDEX; ++i)
+        {
+            UnitActionBarEntry const* actionBarEntry = m_charmInfo->GetActionBarEntry(i);
+            if (actionBarEntry && actionBarEntry->IsActionBarForSpell() &&
+                actionBarEntry->GetAction() == spellId)
+                return true;
+        }
+
+        return false;
+    };
+
+    bool brokenGhoulBar = !hasAnySavedAction;
+    for (GhoulSpellPair const& spellPair : GhoulSpellPairs)
+    {
+        if (!hasActionBarSpell(spellPair.ExecutionSpellId))
+        {
+            brokenGhoulBar = true;
+            break;
+        }
+    }
+
+    if (brokenGhoulBar)
+    {
+        // 当前数据库可能已经包含来自之前错误测试版本的损坏食尸鬼动作栏。
+        // 仅当缺少必要的食尸鬼技能时才重建。尽可能保留玩家在C3中的命令选择，
+        // 这样在动作栏恢复健康后，用停留替换移动到可以保留。
+        uint32 commandSlot2Action = COMMAND_MOVE_TO;
+        ActiveStates commandSlot2State = ACT_COMMAND;
+
+        if (UnitActionBarEntry const* slot2 = m_charmInfo->GetActionBarEntry(2))
+        {
+            if (slot2->GetType() == ACT_COMMAND &&
+                (slot2->GetAction() == COMMAND_STAY || slot2->GetAction() == COMMAND_MOVE_TO))
+            {
+                commandSlot2Action = slot2->GetAction();
+                commandSlot2State = ActiveStates(slot2->GetType());
+            }
+        }
+
+        SetReactState(REACT_ASSIST);
+
+        m_charmInfo->SetActionBar(0, COMMAND_ATTACK, ACT_COMMAND);
+        m_charmInfo->SetActionBar(1, COMMAND_FOLLOW, ACT_COMMAND);
+        m_charmInfo->SetActionBar(2, commandSlot2Action, commandSlot2State);
+
+        // 保持旧稳定修复说明中使用的类似官方的顺序：
+        // C4 爪击, C5 撕咬, C6 跳跃, C7 蜷缩。
+        // 直接使用GhoulSpellPairs，这样这个块不依赖于不同TrinityCore快照中的本地常量名称。
+        m_charmInfo->SetActionBar(3, GhoulSpellPairs[0].ExecutionSpellId, getActionState(GhoulSpellPairs[0]));
+        m_charmInfo->SetActionBar(4, GhoulSpellPairs[1].ExecutionSpellId, getActionState(GhoulSpellPairs[1]));
+        m_charmInfo->SetActionBar(5, GhoulSpellPairs[2].ExecutionSpellId, getActionState(GhoulSpellPairs[2]));
+        m_charmInfo->SetActionBar(6, GhoulSpellPairs[3].ExecutionSpellId, getActionState(GhoulSpellPairs[3]));
+
+        m_charmInfo->SetActionBar(7, REACT_ASSIST, ACT_REACTION);
+        m_charmInfo->SetActionBar(8, REACT_DEFENSIVE, ACT_REACTION);
+        m_charmInfo->SetActionBar(9, REACT_PASSIVE, ACT_REACTION);
+
+        SavePetToDB(PET_SAVE_AS_CURRENT);
+    }
+    else
+    {
+        UnitActionBarEntry const* slot5 = m_charmInfo->GetActionBarEntry(5);
+        UnitActionBarEntry const* slot6 = m_charmInfo->GetActionBarEntry(6);
+
+        if (slot5 && slot6 &&
+            slot5->IsActionBarForSpell() && slot6->IsActionBarForSpell() &&
+            slot5->GetAction() == GhoulSpellPairs[3].ExecutionSpellId &&
+            slot6->GetAction() == GhoulSpellPairs[2].ExecutionSpellId)
+        {
+            // 早期测试版本将动作栏修复为C6蜷缩 / C7跳跃。
+            // 纠正一次为预期顺序：C6跳跃 / C7蜷缩。
+            m_charmInfo->SetActionBar(5, GhoulSpellPairs[2].ExecutionSpellId, getActionState(GhoulSpellPairs[2]));
+            m_charmInfo->SetActionBar(6, GhoulSpellPairs[3].ExecutionSpellId, ACT_PASSIVE);
+            SavePetToDB(PET_SAVE_AS_CURRENT);
+        }
+    }
 }
 
 void Pet::ToggleAutocast(SpellInfo const* spellInfo, bool apply)
 {
     ASSERT(spellInfo);
 
-    if (!spellInfo->IsAutocastable())
+    // 现代复活的食尸鬼自动施法由9xxxx宠物技能直接驱动。
+    // 它们的DB2自动施法标志可能没有描述这个DK特定的设置，因此只允许真正的自动施法食尸鬼技能参与。
+    // 蜷缩是手动技能。
+    bool const isGhoulAutocastExecutionSpell = GetEntry() == NPC_DK_RISEN_GHOUL && IsGhoulAutocastExecutionSpellId(spellInfo->Id);
+    if (!spellInfo->IsAutocastable() && !isGhoulAutocastExecutionSpell)
         return;
 
     PetSpellMap::iterator itr = m_spells.find(spellInfo->Id);
@@ -1656,6 +1989,9 @@ void Pet::ToggleAutocast(SpellInfo const* spellInfo, bool apply)
 
 bool Pet::IsPermanentPetFor(Player* owner) const
 {
+    if (!owner)
+        return false;
+
     switch (getPetType())
     {
         case SUMMON_PET:
@@ -1664,7 +2000,17 @@ bool Pet::IsPermanentPetFor(Player* owner) const
                 case CLASS_WARLOCK:
                     return GetCreatureTemplate()->type == CREATURE_TYPE_DEMON;
                 case CLASS_DEATH_KNIGHT:
-                    return GetCreatureTemplate()->type == CREATURE_TYPE_UNDEAD;
+                {
+                    // Death Knight Raise Dead differs by specialization in modern data:
+                    // Blood/Frost may summon a temporary ghoul when the talent is selected,
+                    // while Unholy keeps Risen Ghoul as a permanent pet.
+                    // Do not treat every undead DK summon as permanent, or temporary
+                    // Blood/Frost ghouls will be saved/restored like Unholy pets.
+                    if (GetEntry() != NPC_DK_RISEN_GHOUL)
+                        return false;
+
+                    return AsUnderlyingType(owner->GetPrimarySpecialization()) == CHR_SPEC_DEATH_KNIGHT_UNHOLY;
+                }
                 case CLASS_MAGE:
                     return GetCreatureTemplate()->type == CREATURE_TYPE_ELEMENTAL;
                 default:

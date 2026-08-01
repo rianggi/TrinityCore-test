@@ -156,7 +156,71 @@
 enum PlayerSpells
 {
     SPELL_EXPERIENCE_ELIMINATED = 206662,
+    SPELL_DK_RAISE_DEAD_OLD = 46584,
+    SPELL_DK_RAISE_DEAD_SUMMON = 52150,
+    SPELL_DK_RAISE_DEAD_MODERN = 1242866,
 };
+
+namespace
+{
+    uint32 constexpr NPC_DK_RISEN_GHOUL = 26125;
+
+    // DK食尸鬼显示法术ID（法术书显示用）
+    uint32 constexpr SPELL_DK_GHOUL_CLAW_DISPLAY = 47468;
+    uint32 constexpr SPELL_DK_GHOUL_GNAW_DISPLAY = 47481;
+    uint32 constexpr SPELL_DK_GHOUL_LEAP_DISPLAY = 47482;
+    uint32 constexpr SPELL_DK_GHOUL_HUDDLE_DISPLAY = 47484;
+
+    // DK食尸鬼现代执行法术ID（动作条/施法用）
+    uint32 constexpr SPELL_DK_GHOUL_CLAW_EXECUTION = 91776;
+    uint32 constexpr SPELL_DK_GHOUL_GNAW_EXECUTION = 91800;
+    uint32 constexpr SPELL_DK_GHOUL_LEAP_EXECUTION = 91809;
+    uint32 constexpr SPELL_DK_GHOUL_HUDDLE_EXECUTION = 91838;
+
+    // DK食尸鬼法术书条目结构体
+    struct GhoulSpellBookEntry
+    {
+        uint32 DisplaySpellId;
+        uint32 ExecutionSpellId;
+        ActiveStates DefaultState;
+        bool SupportsAutocast;
+    };
+
+    // DK食尸鬼法术书配置表
+    GhoulSpellBookEntry constexpr GhoulSpellBookEntries[] =
+    {
+        { SPELL_DK_GHOUL_CLAW_DISPLAY, SPELL_DK_GHOUL_CLAW_EXECUTION, ACT_ENABLED, true },
+        { SPELL_DK_GHOUL_GNAW_DISPLAY, SPELL_DK_GHOUL_GNAW_EXECUTION, ACT_ENABLED, true },
+        { SPELL_DK_GHOUL_LEAP_DISPLAY, SPELL_DK_GHOUL_LEAP_EXECUTION, ACT_ENABLED, true },
+        { SPELL_DK_GHOUL_HUDDLE_DISPLAY, SPELL_DK_GHOUL_HUDDLE_EXECUTION, ACT_PASSIVE, false }
+    };
+
+    // 判断是否是DK食尸鬼显示法术
+    bool IsDkGhoulDisplaySpell(uint32 spellId)
+    {
+        for (GhoulSpellBookEntry const& entry : GhoulSpellBookEntries)
+            if (entry.DisplaySpellId == spellId)
+                return true;
+
+        return false;
+    }
+
+    // 判断是否是DK食尸鬼现代执行法术
+    bool IsDkGhoulModernSpell(uint32 spellId)
+    {
+        for (GhoulSpellBookEntry const& entry : GhoulSpellBookEntries)
+            if (entry.ExecutionSpellId == spellId)
+                return true;
+
+        return false;
+    }
+
+    // 判断是否是永久DK食尸鬼
+    bool IsPermanentDkRisenGhoul(Pet const* pet, Player* owner)
+    {
+        return pet && owner && pet->GetEntry() == NPC_DK_RISEN_GHOUL && pet->IsPermanentPetFor(owner);
+    }
+}
 
 static uint32 corpseReclaimDelay[MAX_DEATH_COUNT] = { 30, 60, 120 };
 
@@ -2188,8 +2252,17 @@ void Player::SetXP(uint32 xp)
 
     int32 playerLevelDelta = 0;
 
+    // 修复登录时ScalingPlayerLevelDelta计算错误的bug。
+    // LoadFromDB中SetXP先于InitStatsForLevel执行，此时NextLevelXP仍为0，
+    // 导致delta始终为0，登录看到怪是同级，打怪获得经验后才正确变成-1。
+    // 当NextLevelXP为0时，从经验表中查询当前等级的正确升级所需经验。
+    // 注意：不能用GetXPForNextLevel()，因为它直接返回NextLevelXP字段本身。
+    uint32 nextLevelXP = *m_activePlayerData->NextLevelXP;
+    if (!nextLevelXP && GetLevel() < MAX_LEVEL)
+        nextLevelXP = sObjectMgr->GetXPForLevel(GetLevel());
+
     // If XP < 50%, player should see scaling creature with -1 level except for level max
-    if (GetLevel() < MAX_LEVEL && xp < uint32(*m_activePlayerData->NextLevelXP / 2))
+    if (GetLevel() < MAX_LEVEL && nextLevelXP && xp < uint32(nextLevelXP / 2))
         playerLevelDelta = -1;
 
     SetUpdateFieldValue(m_values.ModifyValue(&Player::m_activePlayerData).ModifyValue(&UF::ActivePlayerData::ScalingPlayerLevelDelta), playerLevelDelta);
@@ -2307,7 +2380,9 @@ void Player::GiveLevel(uint8 level)
     for (uint8 i = STAT_STRENGTH; i < MAX_STATS; ++i)
         SetCreateStat(Stats(i), info.stats[i]);
 
-    SetCreateHealth(0);
+    // 使用 ExpectedStat DB2 数据设置玩家基础血量（含基础耐力贡献）
+    float expectedPlayerHealth = sDB2Manager.EvaluateExpectedStat(ExpectedStatType::PlayerHealth, GetLevel(), -2, 0, Classes(GetClass()), 0);
+    SetCreateHealth(expectedPlayerHealth > 1.0f ? uint32(expectedPlayerHealth) : 0);
     SetCreateMana(basemana);
 
     InitTalentForLevel();
@@ -2436,7 +2511,9 @@ void Player::InitStatsForLevel(bool reapplyMods)
     for (uint8 i = STAT_STRENGTH; i < MAX_STATS; ++i)
         SetStat(Stats(i), info.stats[i]);
 
-    SetCreateHealth(0);
+    // 使用 ExpectedStat DB2 数据设置玩家基础血量（含基础耐力贡献）
+    float expectedPlayerHealth = sDB2Manager.EvaluateExpectedStat(ExpectedStatType::PlayerHealth, GetLevel(), -2, 0, Classes(GetClass()), 0);
+    SetCreateHealth(expectedPlayerHealth > 1.0f ? uint32(expectedPlayerHealth) : 0);
 
     //set create powers
     SetCreateMana(basemana);
@@ -18670,6 +18747,18 @@ bool Player::LoadFromDB(ObjectGuid guid, CharacterDatabaseQueryHolder const& hol
     _LoadGlyphs(holder.GetPreparedResult(PLAYER_LOGIN_QUERY_LOAD_GLYPHS));
     _LoadAuras(holder.GetPreparedResult(PLAYER_LOGIN_QUERY_LOAD_AURAS), holder.GetPreparedResult(PLAYER_LOGIN_QUERY_LOAD_AURA_EFFECTS), time_diff);
     _LoadGlyphAuras();
+
+    if (GetClass() == CLASS_DEATH_KNIGHT)
+    {
+        // Clear stale Raise Dead auras on login. Normal logout removes them
+        // before saving, but abnormal disconnects (crash, kick, network drop)
+        // can leave them in the character_aura table while summonedPetNumber
+        // is already 0, leaving the player in an inconsistent state.
+        RemoveAurasDueToSpell(SPELL_DK_RAISE_DEAD_MODERN);
+        RemoveAurasDueToSpell(SPELL_DK_RAISE_DEAD_SUMMON);
+        RemoveAurasDueToSpell(SPELL_DK_RAISE_DEAD_OLD);
+    }
+
     // add ghost flag (must be after aura load: PLAYER_FLAGS_GHOST set in aura)
     if (HasPlayerFlag(PLAYER_FLAGS_GHOST))
         m_deathState = DEAD;
@@ -19250,6 +19339,12 @@ void Player::_LoadInventory(PreparedQueryResult result, PreparedQueryResult arti
             {
                 if (ItemAdditionalLoadInfo* addionalDataPtr = Trinity::Containers::MapGetValuePtr(additionalData, fields[0].GetUInt64()))
                     item->LoadAdditionalDataFromDB(this, addionalDataPtr);
+
+                // 补设非传家宝缩放物品的固定等级（修复前获取的物品数据库中 fixedScalingLevel=0）
+                uint32 oldFixedLevel = item->GetModifier(ITEM_MODIFIER_TIMEWALKER_LEVEL);
+                item->SetFixedLevel(GetLevel());
+                if (item->GetModifier(ITEM_MODIFIER_TIMEWALKER_LEVEL) != oldFixedLevel)
+                    item->SetState(ITEM_CHANGED, this);
 
                 ObjectGuid bagGuid = fields[52].GetUInt64() ? ObjectGuid::Create<HighGuid::Item>(fields[52].GetUInt64()) : ObjectGuid::Empty;
                 uint8 slot = fields[53].GetUInt8();
@@ -20709,7 +20804,21 @@ void Player::SaveToDB(LoginDatabaseTransaction loginTransaction, CharacterDataba
         stmt->setUInt32(index++, AsUnderlyingType(GetPrimarySpecialization()));
         stmt->setUInt16(index++, (uint16)m_ExtraFlags);
         if (PetStable const* petStable = GetPetStable())
-            stmt->setUInt32(index++, petStable->GetCurrentPet() && petStable->GetCurrentPet()->Health > 0 ? petStable->GetCurrentPet()->PetNumber : 0); // summonedPetNumber
+        {
+            PetStable::PetInfo const* currentPet = petStable->GetCurrentPet();
+
+            // Retail-like DK permanent ghoul logout behavior:
+            // keep the saved character_pet record, but do not save the ghoul as
+            // the currently summoned pet on logout. This prevents the character
+            // selection screen and next login from showing/restoring the ghoul
+            // automatically. The player must press Raise Dead again to restore
+            // the existing permanent ghoul record.
+            if (m_session->isLogingOut() && GetClass() == CLASS_DEATH_KNIGHT &&
+                currentPet && currentPet->CreatureId == NPC_DK_RISEN_GHOUL)
+                stmt->setUInt32(index++, 0); // summonedPetNumber
+            else
+                stmt->setUInt32(index++, currentPet && currentPet->Health > 0 ? currentPet->PetNumber : 0); // summonedPetNumber
+        }
         else
             stmt->setUInt32(index++, 0); // summonedPetNumber
         stmt->setUInt16(index++, (uint16)m_atLoginFlags);
@@ -20805,6 +20914,17 @@ void Player::SaveToDB(LoginDatabaseTransaction loginTransaction, CharacterDataba
     _SaveSpells(trans);
     GetSpellHistory()->SaveToDB<Player>(trans);
     _SaveActions(trans);
+
+    if (m_session->isLogingOut() && GetClass() == CLASS_DEATH_KNIGHT)
+    {
+        // 1242866 is the modern 12.x Raise Dead aura. It represents the active
+        // ghoul state and should not persist through logout. Clear it before
+        // _SaveAuras(), but do not delete the permanent ghoul from character_pet.
+        RemoveAurasDueToSpell(SPELL_DK_RAISE_DEAD_MODERN);
+        RemoveAurasDueToSpell(SPELL_DK_RAISE_DEAD_SUMMON);
+        RemoveAurasDueToSpell(SPELL_DK_RAISE_DEAD_OLD);
+    }
+
     _SaveAuras(trans);
     _SaveSkills(trans);
     _SaveStoredAuraTeleportLocations(trans);
@@ -22147,6 +22267,17 @@ void Player::RemovePet(Pet* pet, PetSaveMode mode, bool returnreagent)
         return;
     }
 
+    if (GetClass() == CLASS_DEATH_KNIGHT && pet->GetEntry() == NPC_DK_RISEN_GHOUL &&
+        (mode == PET_SAVE_NOT_IN_SLOT || mode == PET_SAVE_AS_DELETED))
+    {
+        // Manual dismiss/delete removes the active ghoul state from the player.
+        // This is not used for normal logout saving, where the permanent pet data
+        // is kept but summonedPetNumber is saved as 0.
+        RemoveAurasDueToSpell(SPELL_DK_RAISE_DEAD_MODERN);
+        RemoveAurasDueToSpell(SPELL_DK_RAISE_DEAD_SUMMON);
+        RemoveAurasDueToSpell(SPELL_DK_RAISE_DEAD_OLD);
+    }
+
     pet->CombatStop();
 
     // exit areatriggers before saving to remove auras applied by them
@@ -22508,13 +22639,53 @@ void Player::PetSpellInitialize()
 
     if (pet->IsPermanentPetFor(this))
     {
-        // spells loop
-        for (PetSpellMap::iterator itr = pet->m_spells.begin(); itr != pet->m_spells.end(); ++itr)
+        if (IsPermanentDkRisenGhoul(pet, this))
         {
-            if (itr->second.state == PETSPELL_REMOVED)
-                continue;
+            // 永久DK食尸鬼走专用逻辑
+            // ActionButtons使用现代9xxxx食尸鬼法术以保证Huddle/Cower正常工作
+            // 同时发送474xx显示法术用于法术书UI显示
+            for (GhoulSpellBookEntry const& entry : GhoulSpellBookEntries)
+            {
+                PetSpellMap::const_iterator executionItr = pet->m_spells.find(entry.ExecutionSpellId);
+                if (executionItr == pet->m_spells.end() || executionItr->second.state == PETSPELL_REMOVED)
+                    continue;
 
-            petSpellsPacket.Actions.push_back(MAKE_UNIT_ACTION_BUTTON(itr->first, itr->second.active));
+                ActiveStates activeState = entry.DefaultState;
+                if (entry.SupportsAutocast)
+                {
+                    activeState = ACT_DISABLED;
+
+                    if (executionItr->second.active == ACT_ENABLED)
+                        activeState = ACT_ENABLED;
+                }
+
+                petSpellsPacket.Actions.push_back(MAKE_UNIT_ACTION_BUTTON(entry.ExecutionSpellId, activeState));
+                petSpellsPacket.Actions.push_back(MAKE_UNIT_ACTION_BUTTON(entry.DisplaySpellId, activeState));
+            }
+
+            // 添加其他真实被动技能（躲闪/Avoidance等）
+            for (PetSpellMap::const_iterator itr = pet->m_spells.begin(); itr != pet->m_spells.end(); ++itr)
+            {
+                if (itr->second.state == PETSPELL_REMOVED)
+                    continue;
+
+                if (IsDkGhoulDisplaySpell(itr->first) || IsDkGhoulModernSpell(itr->first))
+                    continue;
+
+                petSpellsPacket.Actions.push_back(MAKE_UNIT_ACTION_BUTTON(itr->first, itr->second.active));
+            }
+        }
+        else
+        {
+            // 普通宠物保持原逻辑
+            // spells loop
+            for (PetSpellMap::iterator itr = pet->m_spells.begin(); itr != pet->m_spells.end(); ++itr)
+            {
+                if (itr->second.state == PETSPELL_REMOVED)
+                    continue;
+
+                petSpellsPacket.Actions.push_back(MAKE_UNIT_ACTION_BUTTON(itr->first, itr->second.active));
+            }
         }
     }
 
@@ -23197,6 +23368,7 @@ bool Player::ActivateTaxiPathTo(std::vector<uint32> const& nodes, Creature* npc 
     {
         // not let cheating with start flight mounted
         RemoveAurasByType(SPELL_AURA_MOUNTED);
+        Dismount();
 
         if (GetDisplayId() != GetNativeDisplayId())
             RestoreDisplayId(true);
@@ -23218,6 +23390,7 @@ bool Player::ActivateTaxiPathTo(std::vector<uint32> const& nodes, Creature* npc 
     else
     {
         RemoveAurasByType(SPELL_AURA_MOUNTED);
+        Dismount();
 
         if (GetDisplayId() != GetNativeDisplayId())
             RestoreDisplayId(true);
@@ -23440,6 +23613,14 @@ void Player::StartTaxiMovement(uint32 mountDisplayId, uint32 path, uint32 pathNo
 {
     // remove fake death
     RemoveAurasWithInterruptFlags(SpellAuraInterruptFlags::Interacting);
+
+    // 进入 NPC taxi 飞行路径前立即解散宠物。原版此处遗漏了 UnsummonPetTemporaryIfAny() 调用，
+    // 仅靠 Mount() 触发的 DisablePetControlsOnMount() 只会让宠物变被动跟随，不会真正移除。
+    // 这会导致玩家起飞后宠物用 MoveFollow 跟不上，直到超视距后才被 Pet::Update 移除，
+    // 玩家看到的现象就是"宠物一直跟随，距离拉远才消失"。
+    // 调用顺序：先解散宠物再 Mount，避免 Mount 中的 DisablePetControlsOnMount 对一只
+    // 即将被移除的宠物做无意义的 react state 修改。
+    UnsummonPetTemporaryIfAny();
 
     if (mountDisplayId)
         Mount(mountDisplayId);
@@ -28064,7 +28245,11 @@ void Player::ResummonBattlePetTemporaryUnSummonedIfAny()
 
 bool Player::IsPetNeedBeTemporaryUnsummoned() const
 {
-    return !IsInWorld() || !IsAlive() || HasUnitMovementFlag(MOVEMENTFLAG_FLYING) || HasExtraUnitMovementFlag2(MOVEMENTFLAG3_ADV_FLYING);
+    // 补充 IsInFlight() 检查：NPC taxi 飞行路径使用 FlightPathMovementGenerator，仅设置
+    // UNIT_STATE_IN_FLIGHT，不设置 MOVEMENTFLAG_FLYING。若不补这个判断，跨地图 taxi 期间
+    // 触发的 TeleportTo 流程会调用 ResummonPetTemporaryUnSummonedIfAny()，在玩家仍在 taxi
+    // 飞行状态下错误地把食尸鬼召唤出来。
+    return !IsInWorld() || !IsAlive() || IsInFlight() || HasUnitMovementFlag(MOVEMENTFLAG_FLYING) || HasExtraUnitMovementFlag2(MOVEMENTFLAG3_ADV_FLYING);
 }
 
 bool Player::CanSeeGossipOn(Creature const* creature) const
