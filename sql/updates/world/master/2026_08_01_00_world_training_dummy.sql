@@ -17,4 +17,5 @@ UPDATE `creature_template` SET `AIName` = 'npc_training_dummy', `ScriptName` = '
 UPDATE `creature_template_difficulty` SET `ContentTuningID` = 181, `HealthModifier` = 25 WHERE `Entry` = 46647;
 
 -- 防止 creature 表中 curHealthPct=0 导致重载后假人0血量
-UPDATE `creature` SET `curHealthPct` = 100 WHERE `id1` = 46647;
+-- 注意：creature 表字段是 `id`，不是 `id1`（12.0.5 表结构）
+UPDATE `creature` SET `curHealthPct` = 100 WHERE `id` = 46647;
