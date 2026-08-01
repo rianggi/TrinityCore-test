@@ -1,3 +1,3 @@
---
-DROP TABLE IF EXISTS `spell_scripts`;
-DELETE FROM `command` WHERE `name` = 'reload spell_scripts';
+-- 此更新在 12.0.7 中删除 spell_scripts 表，但 12.0.5 仍需要该表，故禁用
+-- DROP TABLE IF EXISTS `spell_scripts`;
+-- DELETE FROM `command` WHERE `name` = 'reload spell_scripts';
