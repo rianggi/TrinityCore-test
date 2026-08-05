@@ -29,3 +29,7 @@ cmake-build-*/*
 
 # Temporary modified files
 modified_files/
+
+# AI tool local configs
+.agents/
+.claude/
