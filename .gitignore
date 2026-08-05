@@ -26,3 +26,6 @@ cmake-build-*/*
 
 # PowerShell scripts
 *.ps1
+
+# Temporary modified files
+modified_files/
