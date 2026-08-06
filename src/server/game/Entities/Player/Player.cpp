@@ -2380,9 +2380,12 @@ void Player::GiveLevel(uint8 level)
     for (uint8 i = STAT_STRENGTH; i < MAX_STATS; ++i)
         SetCreateStat(Stats(i), info.stats[i]);
 
-    // 使用 ExpectedStat DB2 数据设置玩家基础血量（含基础耐力贡献）
-    float expectedPlayerHealth = sDB2Manager.EvaluateExpectedStat(ExpectedStatType::PlayerHealth, GetLevel(), -2, 0, Classes(GetClass()), 0);
-    SetCreateHealth(expectedPlayerHealth > 1.0f ? uint32(expectedPlayerHealth) : 0);
+    // ponytail: 使用基础耐力 × HpPerSta 比率计算玩家基础血量，与客户端耐力面板显示一致
+    float hpPerStaRatio = 10.0f;
+    if (GtHpPerStaEntry const* hpBase = sHpPerStaGameTable.GetRow(GetLevel()))
+        hpPerStaRatio = hpBase->Health;
+    uint32 baseHealth = uint32(m_createStats[STAT_STAMINA] * hpPerStaRatio);
+    SetCreateHealth(baseHealth > 0 ? baseHealth : 0);
     SetCreateMana(basemana);
 
     InitTalentForLevel();
@@ -2511,9 +2514,12 @@ void Player::InitStatsForLevel(bool reapplyMods)
     for (uint8 i = STAT_STRENGTH; i < MAX_STATS; ++i)
         SetStat(Stats(i), info.stats[i]);
 
-    // 使用 ExpectedStat DB2 数据设置玩家基础血量（含基础耐力贡献）
-    float expectedPlayerHealth = sDB2Manager.EvaluateExpectedStat(ExpectedStatType::PlayerHealth, GetLevel(), -2, 0, Classes(GetClass()), 0);
-    SetCreateHealth(expectedPlayerHealth > 1.0f ? uint32(expectedPlayerHealth) : 0);
+    // ponytail: 使用基础耐力 × HpPerSta 比率计算玩家基础血量，与客户端耐力面板显示一致
+    float hpPerStaRatio = 10.0f;
+    if (GtHpPerStaEntry const* hpBase = sHpPerStaGameTable.GetRow(GetLevel()))
+        hpPerStaRatio = hpBase->Health;
+    uint32 baseHealth = uint32(m_createStats[STAT_STAMINA] * hpPerStaRatio);
+    SetCreateHealth(baseHealth > 0 ? baseHealth : 0);
 
     //set create powers
     SetCreateMana(basemana);
