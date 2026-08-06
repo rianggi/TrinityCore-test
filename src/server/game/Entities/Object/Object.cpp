@@ -816,12 +816,12 @@ float WorldObject::GetSightRange(WorldObject const* target) const
 
         if (Creature const* creature = ToCreature())
         {
-            // ponytail: 怪物对玩家使用动态视野距离=基础15码+等级差,低等级怪看不到远处高等级玩家
+            // ponytail: 怪物对玩家使用动态视野距离=基础15码-等级差,高等级玩家靠近低等级怪时视野小(灰色怪不轻易aggro)
             // UpgradePath: 如果后续有serverconfig可配置基础距离/上下限,从配置读取替代硬编码
             if (target && target->IsPlayer())
             {
                 int32 levelDiff = int32(target->GetLevelForTarget(creature)) - int32(creature->GetLevel());
-                float sight = 15.0f + float(levelDiff);
+                float sight = 15.0f - float(levelDiff);
                 sight = std::clamp(sight, 5.0f, 50.0f);
                 return sight;
             }
