@@ -827,8 +827,9 @@ void Creature::Update(uint32 diff)
             if (m_deathState != CORPSE)
                 break;
 
-            if (IsEngaged())
-                Unit::AIUpdateTick(diff);
+            // ponytail: CORPSE状态不再跑AI,避免死亡后仍攻击
+            // 原逻辑: IsEngaged()时Unit::AIUpdateTick(diff),导致尸体仍在攻击
+            // 死亡后威胁列表可能未完全清空,此处不再执行AI更新
 
             if (m_loot)
                 m_loot->Update();
@@ -2001,7 +2002,9 @@ void Creature::LoadEquipment(int8 id, bool force /*= true*/)
 
 void Creature::SetSpawnHealth()
 {
-    SetHealth(CountPctFromMaxHealth(m_creatureData ? m_creatureData->curHealthPct : 100));
+    // ponytail: 忽略curHealthPct,强制满血复活;原curHealthPct常在死亡时被存为0,导致刷出1HP
+    // UpgradePath: 如果TC以后提供creature_template级默认血量百分比配置,可从该处读取替代硬编码100
+    SetHealth(CountPctFromMaxHealth(100));
     SetInitialPowerValue(GetPowerType());
 }
 
@@ -3056,7 +3059,11 @@ void Creature::UpdateNearbyPlayersInteractions()
 
 bool Creature::HasScalableLevels() const
 {
-    return m_unitData->ContentTuningID != 0;
+    // ponytail: ContentTuningID==0也允许缩放;DB2缺失时ApplyLevelScaling会走fallback 1~80
+    // CreatureDifficulty 结构体没有 ScalingLevelMin/Max,只有 DeltaLevelMin/Max
+    // UpgradePath: 所有生物ContentTuning齐全后,可改回ContentTuningID != 0
+    CreatureDifficulty const* diff = GetCreatureDifficulty();
+    return diff->ContentTuningID != 0 || diff->DeltaLevelMax != 0 || diff->DeltaLevelMin != 0;
 }
 
 void Creature::ApplyLevelScaling()
@@ -3067,6 +3074,23 @@ void Creature::ApplyLevelScaling()
     {
         SetUpdateFieldValue(m_values.ModifyValue(&Unit::m_unitData).ModifyValue(&UF::UnitData::ScalingLevelMin), levels->MinLevel);
         SetUpdateFieldValue(m_values.ModifyValue(&Unit::m_unitData).ModifyValue(&UF::UnitData::ScalingLevelMax), levels->MaxLevel);
+    }
+    else
+    {
+        // ponytail: ContentTuning缺失时用 DeltaLevelMin/Max 作为fallback基础值,缺失时用1~80
+        // 避免RoundToInterval(0,1,80)=1导致所有生物固定1级
+        // CreatureDifficulty 没有 ScalingLevelMin/Max,只有 DeltaLevelMin/Max
+        // UpgradePath: content_tuning表数据齐全后可移除本分支
+        uint32 minLvl = 1u;
+        uint32 maxLvl = 80u;
+        if (creatureDifficulty->DeltaLevelMin)
+            minLvl = uint32(std::max(1, int32(creatureDifficulty->DeltaLevelMin)));
+        if (creatureDifficulty->DeltaLevelMax)
+            maxLvl = uint32(std::max(1, int32(creatureDifficulty->DeltaLevelMax)));
+        if (minLvl > maxLvl)
+            std::swap(minLvl, maxLvl);
+        SetUpdateFieldValue(m_values.ModifyValue(&Unit::m_unitData).ModifyValue(&UF::UnitData::ScalingLevelMin), minLvl);
+        SetUpdateFieldValue(m_values.ModifyValue(&Unit::m_unitData).ModifyValue(&UF::UnitData::ScalingLevelMax), maxLvl);
     }
 
     int32 mindelta = std::min(creatureDifficulty->DeltaLevelMax, creatureDifficulty->DeltaLevelMin);

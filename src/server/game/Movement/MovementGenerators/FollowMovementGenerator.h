@@ -48,6 +48,16 @@ class FollowMovementGenerator : public MovementGenerator, public AbstractFollowe
     private:
         static constexpr uint32 CHECK_INTERVAL = 100;
 
+        // ponytail: DK食尸鬼跟随专属常量
+        // UpgradePath: 如需调整跟随手感,改这些常量即可;要做职业配置化再移到conf
+        static constexpr uint32 DK_RISEN_GHOUL_MOVING_REPATH_DIST_THRESHOLD = 4; // 主人移动≥4码才重算路径
+        static constexpr uint32 DK_RISEN_GHOUL_MOVING_TURN_REPATH_MIN_INTERVAL = 500; // 快速转向时repath最小间隔(ms),防转向鬼畜
+        static constexpr float DK_RISEN_GHOUL_MOVING_LEAD_TIME = 0.3f; // spline预计持续时间,配合SetVelocity让移动≈repath间隔
+        static constexpr float DK_RISEN_GHOUL_STRAFE_DEST_SMOOTH_DISTANCE = 2.0f; // 侧移目标点平滑距离阈值
+
+        // 判断是否DK食尸鬼(entry=26125,邪DK永久宠物)
+        static bool _IsDKRisenGhoul(Unit const* owner);
+
         void UpdatePetSpeed(Unit* owner);
 
         float const _range;
@@ -58,6 +68,10 @@ class FollowMovementGenerator : public MovementGenerator, public AbstractFollowe
         Optional<TimeTracker> _duration;
         std::unique_ptr<PathGenerator> _path;
         Optional<Position> _lastTargetPosition;
+
+        // ponytail: DK食尸鬼跟随状态
+        uint32 _dkGhoulMovingRepathTimer; // 转向repath冷却计时
+        Optional<float> _dkGhoulLastOwnerFacing; // 上次主人朝向,用于检测转向幅度
 };
 
 #endif

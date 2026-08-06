@@ -64,6 +64,7 @@ enum DeathKnightSpells
     SPELL_DK_DEATH_AND_DECAY                    = 43265,
     SPELL_DK_DEATH_AND_DECAY_DAMAGE             = 52212,
     SPELL_DK_DEATH_AND_DECAY_INCREASE_TARGETS   = 188290,
+    SPELL_DK_DEATH_COIL                          = 47541,   // 死亡缠绕(消耗RP的主要技能)
     SPELL_DK_DEATH_COIL_DAMAGE                  = 47632,
     SPELL_DK_DEATH_GRIP_DUMMY                   = 243912,
     SPELL_DK_DEATH_GRIP_JUMP                    = 49575,
@@ -71,13 +72,15 @@ enum DeathKnightSpells
     SPELL_DK_DEATH_STRIKE_ENABLER               = 89832, // Server Side
     SPELL_DK_DEATH_STRIKE_HEAL                  = 45470,
     SPELL_DK_DEATH_STRIKE_OFFHAND               = 66188,
-    SPELL_DK_FESTERING_WOUND                    = 194310,
     SPELL_DK_FROST                              = 137006,
     SPELL_DK_FROST_FEVER                        = 55095,
     SPELL_DK_FROST_SCYTHE                       = 207230,
     SPELL_DK_FROST_SHIELD                       = 207203,
     SPELL_DK_GHOUL_BIRTH                        = 1217759,
     SPELL_DK_GLYPH_OF_FOUL_MENAGERIE            = 58642,
+    SPELL_DK_SECONDARY_GHOUL_BUFF               = 1254252, // 脓疮打击施加的buff: 下2-3次天灾打击召唤次级食尸鬼 (ApplyAura, 最多8层)
+    SPELL_DK_SECONDARY_GHOUL_SUMMON             = 275430,  // 次级食尸鬼实际召唤法术 (Summon creature 237409, 持续6秒)
+    SPELL_DK_SCOURGE_STRIKE                     = 55090,   // 天灾打击 (邪DK主技能)
     SPELL_DK_GLYPH_OF_THE_GEIST                 = 58640,
     SPELL_DK_GLYPH_OF_THE_SKELETON              = 146652,
     SPELL_DK_GOREFIENDS_GRASP                   = 108199,
@@ -95,6 +98,7 @@ enum DeathKnightSpells
     SPELL_DK_REAPER_OF_SOULS_PROC               = 469172,
     SPELL_DK_RECENTLY_USED_DEATH_STRIKE         = 180612,
     SPELL_DK_RUNIC_CORRUPTION                   = 51460,
+    SPELL_DK_RUNIC_CORRUPTION_PASSIVE            = 51462, // 邪DK被动: 每消耗1点RP 2%几率触发51460
     SPELL_DK_RUNIC_POWER_ENERGIZE               = 49088,
     SPELL_DK_RUNIC_RETURN                       = 61258,
     SPELL_DK_SANGUINE_GROUND_TALENT             = 391458,
@@ -597,6 +601,19 @@ class spell_dk_death_coil : public SpellScript
         caster->CastSpell(GetHitUnit(), SPELL_DK_DEATH_COIL_DAMAGE, true);
         if (AuraEffect const* unholyAura = caster->GetAuraEffect(SPELL_DK_UNHOLY, EFFECT_6)) // can be any effect, just here to send SPELL_FAILED_DONT_REPORT on failure
             caster->CastSpell(caster, SPELL_DK_UNHOLY_VIGOR, unholyAura);
+
+        // ponytail: 符文腐蚀(51462)直接触发 - 死亡缠绕消耗30 RP → 60%几率触发51460
+        // proc系统方案(DoCheckProc)在某些场景GetProcSpell()返回空导致不生效, 保留直接触发作为保底
+        if (caster->HasAura(SPELL_DK_RUNIC_CORRUPTION_PASSIVE))
+        {
+            Optional<int32> rpCost = GetSpell()->GetPowerTypeCostAmount(POWER_RUNIC_POWER);
+            if (rpCost && *rpCost > 0)
+            {
+                int32 chance = 2 * (*rpCost); // 每点RP 2%几率
+                if (roll_chance(chance))
+                    caster->CastSpell(caster, SPELL_DK_RUNIC_CORRUPTION, true);
+            }
+        }
     }
 
     void Register() override
@@ -785,21 +802,75 @@ private:
 };
 
 // 85948 - Festering Strike
+// ponytail: 85948效果结构(DB2 12.0.5.67235):
+//   EFFECT_0=SCHOOL_DAMAGE(物理伤害, 目标=敌人)
+//   EFFECT_1=APPLY_AURA(给caster, MiscValue=6)
+//   EFFECT_2=DUMMY(EffectBasePointsF=2, 目标=敌人) — 次级食尸鬼层数下限
+//   EFFECT_3=DUMMY(EffectBasePointsF=3, 目标=敌人) — 次级食尸鬼层数上限
+// 旧版194310(溃烂伤口)在12.x已移除, 不再检查。脚本注册在EFFECT_2(DUMMY)上, 命中时给caster上1254252(2-3层)
 class spell_dk_festering_strike : public SpellScript
 {
     bool Validate(SpellInfo const* /*spellInfo*/) override
     {
-        return ValidateSpellInfo({ SPELL_DK_FESTERING_WOUND });
+        return ValidateSpellInfo({ SPELL_DK_SECONDARY_GHOUL_BUFF });
     }
 
     void HandleScriptEffect(SpellEffIndex /*effIndex*/)
     {
-        GetCaster()->CastSpell(GetHitUnit(), SPELL_DK_FESTERING_WOUND, CastSpellExtraArgs(TRIGGERED_FULL_MASK).AddSpellMod(SPELLVALUE_AURA_STACK, GetEffectValueAsInt()));
+        Unit* caster = GetCaster();
+
+        // 官服机制：脓疮打击命中后给玩家上1254252 buff(2-3层), 后续天灾打击触发次级食尸鬼
+        // 85948 EFFECT_2=2(下限), EFFECT_3=3(上限), 用urand(2,3)随机层数
+        int32 stacks = urand(2, 3);
+        // ponytail: 用TriggeringSpell+最小触发标志, 避免TRIGGERED_FULL_MASK播放施法动画导致动作鬼畜
+        caster->CastSpell(caster, SPELL_DK_SECONDARY_GHOUL_BUFF,
+            CastSpellExtraArgs(TRIGGERED_IGNORE_CAST_IN_PROGRESS | TRIGGERED_DONT_REPORT_CAST_ERROR)
+                .SetTriggeringSpell(GetSpell())
+                .AddSpellMod(SPELLVALUE_AURA_STACK, stacks));
     }
 
     void Register() override
     {
-        OnEffectHitTarget += SpellEffectFn(spell_dk_festering_strike::HandleScriptEffect, EFFECT_1, SPELL_EFFECT_DUMMY);
+        // 注册在EFFECT_2(DUMMY)上, 与DB2效果类型匹配; EFFECT_0是SCHOOL_DAMAGE不应被脚本拦截
+        OnEffectHitTarget += SpellEffectFn(spell_dk_festering_strike::HandleScriptEffect, EFFECT_2, SPELL_EFFECT_DUMMY);
+    }
+};
+
+// 1254252 - 次级食尸鬼 buff (下2-3次天灾打击召唤次级食尸鬼)
+// 官服机制：脓疮打击给玩家上此buff(2-3层), 天灾打击(55090)施放时触发275430召唤, 消耗1层
+// 1254252是ApplyAura(EffectAura=408), ProcChance=101%, 最多8层, 持续30秒
+class spell_dk_secondary_ghoul : public AuraScript
+{
+    bool Validate(SpellInfo const* /*spellInfo*/) override
+    {
+        return ValidateSpellInfo({ SPELL_DK_SECONDARY_GHOUL_BUFF, SPELL_DK_SECONDARY_GHOUL_SUMMON });
+    }
+
+    bool CheckProc(AuraEffect const* /*aurEff*/, ProcEventInfo const& eventInfo) const
+    {
+        // 仅当天灾打击(55090)施放时触发
+        Spell const* procSpell = eventInfo.GetProcSpell();
+        if (!procSpell)
+            return false;
+
+        return procSpell->GetSpellInfo()->Id == SPELL_DK_SCOURGE_STRIKE;
+    }
+
+    void HandleProc(AuraEffect* /*aurEff*/, ProcEventInfo& /*eventInfo*/)
+    {
+        // 触发275430 次级食尸鬼召唤 (召唤creature 237409, 持续6秒)
+        GetTarget()->CastSpell(GetTarget(), SPELL_DK_SECONDARY_GHOUL_SUMMON, CastSpellExtraArgsInit{ TRIGGERED_FULL_MASK });
+
+        // 官服属性"Do Not Consume Aura Stack On Proc", 但实际需消耗层数(否则无限召唤)
+        // ponytail: 手动消耗1层, 上限8层/30秒
+        GetAura()->ModStackAmount(-1);
+    }
+
+    void Register() override
+    {
+        // ponytail: 用SPELL_AURA_ANY匹配EffectAura=408(SET_ACTION_BUTTON_SPELL_COUNT)
+        DoCheckEffectProc += AuraCheckEffectProcFn(spell_dk_secondary_ghoul::CheckProc, EFFECT_0, SPELL_AURA_ANY);
+        OnEffectProc += AuraEffectProcFn(spell_dk_secondary_ghoul::HandleProc, EFFECT_0, SPELL_AURA_ANY);
     }
 };
 
@@ -1427,6 +1498,51 @@ class spell_dk_t20_2p_rune_empowered : public AuraScript
     int32 _runicPowerSpent = 0;
 };
 
+// 51462 - Runic Corruption (被动天赋, 邪DK)
+// ponytail: 51462是被动aura(DUMMY类型, BaseValue=200), 效果: 每消耗1点RP 2%几率触发51460
+// 死亡缠绕(47541)由spell_dk_death_coil::HandleDummy直接触发(保底方案)
+// 其他消耗RP的技能由本AuraScript的proc系统处理
+// 双重触发风险: 死亡缠绕跳过本proc(由直接触发处理), 避免双重roll
+class spell_dk_runic_corruption : public AuraScript
+{
+    bool Validate(SpellInfo const* /*spellInfo*/) override
+    {
+        return ValidateSpellInfo({ SPELL_DK_RUNIC_CORRUPTION });
+    }
+
+    bool CheckProc(ProcEventInfo& eventInfo)
+    {
+        // 死亡缠绕由直接触发处理, 跳过proc避免双重roll
+        if (SpellInfo const* spellInfo = eventInfo.GetSpellInfo())
+            if (spellInfo->Id == SPELL_DK_DEATH_COIL)
+                return false;
+
+        // 仅当proc法术消耗了符文能量时才触发
+        Spell const* procSpell = eventInfo.GetProcSpell();
+        if (!procSpell)
+            return false;
+
+        Optional<int32> rpCost = procSpell->GetPowerTypeCostAmount(POWER_RUNIC_POWER);
+        if (!rpCost || *rpCost <= 0)
+            return false;
+
+        // 每点RP 2%几率 (51462 BaseValue=200, 200/100=2)
+        int32 totalChance = 2 * (*rpCost);
+        return roll_chance(totalChance);
+    }
+
+    void HandleProc(AuraEffect* /*aurEff*/, ProcEventInfo& /*procInfo*/)
+    {
+        GetTarget()->CastSpell(GetTarget(), SPELL_DK_RUNIC_CORRUPTION, true);
+    }
+
+    void Register() override
+    {
+        DoCheckProc += AuraCheckProcFn(spell_dk_runic_corruption::CheckProc);
+        OnEffectProc += AuraEffectProcFn(spell_dk_runic_corruption::HandleProc, EFFECT_0, SPELL_AURA_ANY);
+    }
+};
+
 // 55233 - Vampiric Blood
 class spell_dk_vampiric_blood : public AuraScript
 {
@@ -1526,6 +1642,7 @@ void AddSC_deathknight_spell_scripts()
     RegisterSpellScript(spell_dk_death_strike);
     RegisterSpellScript(spell_dk_death_strike_enabler);
     RegisterSpellScript(spell_dk_festering_strike);
+    RegisterSpellScript(spell_dk_secondary_ghoul);
     RegisterSpellScript(spell_dk_frost_fever_proc);
     RegisterSpellScript(spell_dk_ghoul_explode);
     RegisterSpellScript(spell_dk_glyph_of_scourge_strike_script);
@@ -1550,6 +1667,7 @@ void AddSC_deathknight_spell_scripts()
     RegisterSpellScript(spell_dk_subduing_grasp);
     RegisterSpellScript(spell_dk_suppression);
     RegisterSpellScript(spell_dk_t20_2p_rune_empowered);
+    RegisterSpellScript(spell_dk_runic_corruption);
     RegisterSpellScript(spell_dk_vampiric_blood);
     RegisterSpellScript(spell_dk_voracious);
 

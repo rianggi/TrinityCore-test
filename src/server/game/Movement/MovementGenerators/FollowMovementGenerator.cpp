@@ -36,7 +36,8 @@ static void DoMovementInform(Unit* owner, Unit* target)
 
 FollowMovementGenerator::FollowMovementGenerator(Unit* target, float range, Optional<ChaseAngle> angle, Optional<Milliseconds> duration,
     bool ignoreTargetWalk /*= false*/, Scripting::v2::ActionResultSetter<MovementStopReason>&& scriptResult /*= {}*/)
-    : AbstractFollower(ASSERT_NOTNULL(target)), _range(range), _angle(angle), _ignoreTargetWalk(ignoreTargetWalk), _checkTimer(CHECK_INTERVAL)
+    : AbstractFollower(ASSERT_NOTNULL(target)), _range(range), _angle(angle), _ignoreTargetWalk(ignoreTargetWalk), _checkTimer(CHECK_INTERVAL),
+      _dkGhoulMovingRepathTimer(0), _dkGhoulLastOwnerFacing()
 {
     Mode = MOTION_MODE_DEFAULT;
     Priority = MOTION_PRIORITY_NORMAL;
@@ -45,6 +46,16 @@ FollowMovementGenerator::FollowMovementGenerator(Unit* target, float range, Opti
     ScriptResult = std::move(scriptResult);
     if (duration)
         _duration.emplace(*duration);
+}
+
+// ponytail: 判断是否邪DK永久食尸鬼宠物(entry=26125,IsPet=true)
+// UpgradePath: 后续如需支持更多DK召唤物类型,扩展entry白名单或改用SpellFamily判断
+bool FollowMovementGenerator::_IsDKRisenGhoul(Unit const* owner)
+{
+    if (!owner) return false;
+    Pet const* pet = owner->ToPet();
+    if (!pet || !pet->IsPet()) return false;
+    return pet->GetEntry() == 26125;
 }
 FollowMovementGenerator::~FollowMovementGenerator() = default;
 
@@ -65,6 +76,10 @@ void FollowMovementGenerator::Initialize(Unit* owner)
     UpdatePetSpeed(owner);
     _path = nullptr;
     _lastTargetPosition.reset();
+
+    // ponytail: DK食尸鬼跟随状态重置
+    _dkGhoulMovingRepathTimer = 0;
+    _dkGhoulLastOwnerFacing.reset();
 }
 
 void FollowMovementGenerator::Reset(Unit* owner)
@@ -109,6 +124,11 @@ bool FollowMovementGenerator::Update(Unit* owner, uint32 diff)
         if (cOwner->IsIgnoringChaseRange())
             range = 0.0f;
 
+    // ponytail: DK食尸鬼专属计时器更新
+    bool const isDKGhoul = _IsDKRisenGhoul(owner);
+    if (isDKGhoul && _dkGhoulMovingRepathTimer > 0)
+        _dkGhoulMovingRepathTimer = _dkGhoulMovingRepathTimer > diff ? (_dkGhoulMovingRepathTimer - diff) : 0;
+
     _checkTimer.Update(diff);
     if (_checkTimer.Passed())
     {
@@ -132,11 +152,66 @@ bool FollowMovementGenerator::Update(Unit* owner, uint32 diff)
         DoMovementInform(owner, target);
     }
 
-    if (!_lastTargetPosition || _lastTargetPosition->GetExactDistSq(target->GetPosition()) > 0.0f)
+    // ponytail: 判断是否需要重发跟随spline
+    // DK食尸鬼分支: 位置变化≥阈值 或 (转向幅度够大且repath冷却已到),避免每帧launch造成加速假象
+    // 其他单位: 保留原逻辑(任何位置变化都触发)
+    bool needRepath = false;
+    if (isDKGhoul)
+    {
+        if (!_lastTargetPosition)
+        {
+            needRepath = true;
+        }
+        else
+        {
+            float distSq = _lastTargetPosition->GetExactDist2dSq(target->GetPosition());
+            // 主人移动距离≥阈值才重算路径,防抖
+            if (distSq >= float(DK_RISEN_GHOUL_MOVING_REPATH_DIST_THRESHOLD * DK_RISEN_GHOUL_MOVING_REPATH_DIST_THRESHOLD))
+            {
+                needRepath = true;
+            }
+            else
+            {
+                // 主人原地快速转向检测: 朝向变化够大,且repath冷却到了(防转向鬼畜)
+                float curFacing = target->GetOrientation();
+                if (_dkGhoulLastOwnerFacing)
+                {
+                    float turnDelta = std::fabs(Position::NormalizeOrientation(curFacing - *_dkGhoulLastOwnerFacing));
+                    // 转向≥30度,且距离上次转向repath≥500ms,才允许触发
+                    if (turnDelta >= 0.5236f && _dkGhoulMovingRepathTimer == 0)
+                        needRepath = true;
+                }
+            }
+        }
+        if (needRepath)
+            _dkGhoulLastOwnerFacing = target->GetOrientation();
+    }
+    else
+    {
+        needRepath = !_lastTargetPosition || (_lastTargetPosition->GetExactDistSq(target->GetPosition()) > 0.0f);
+    }
+
+    if (needRepath)
     {
         _lastTargetPosition = target->GetPosition();
-        if (owner->HasUnitState(UNIT_STATE_FOLLOW_MOVE) || !PositionOkay(owner, target, range + FOLLOW_RANGE_TOLERANCE))
+
+        // ponytail: DK食尸鬼移动中不节流,直接允许重发spline(被中断而非完成→无停顿);
+        // 但当前spline尚未Finalized时不重launch,避免每帧中断造成加速假象
+        bool const splineRunning = owner->HasUnitState(UNIT_STATE_FOLLOW_MOVE) && !owner->movespline->Finalized();
+        bool const posOkay = PositionOkay(owner, target, range + FOLLOW_RANGE_TOLERANCE);
+
+        if (owner->HasUnitState(UNIT_STATE_FOLLOW_MOVE) || !posOkay)
         {
+            if (isDKGhoul && splineRunning)
+            {
+                // ponytail: 食尸鬼spline在跑且距离目标位置尚远→不中断当前spline,等它自然结束或下次触发
+                // 只有离目标点明显偏离时才中断重算(阈值=跟随距离+平滑距离)
+                float offTargetSq = owner->GetExactDist2dSq(target->GetPositionX(), target->GetPositionY());
+                float thresh = range + DK_RISEN_GHOUL_STRAFE_DEST_SMOOTH_DISTANCE + FOLLOW_RANGE_TOLERANCE;
+                if (offTargetSq <= thresh * thresh)
+                    return true;
+            }
+
             if (!_path)
                 _path = std::make_unique<PathGenerator>(owner);
 
@@ -184,6 +259,23 @@ bool FollowMovementGenerator::Update(Unit* owner, uint32 diff)
             init.MovebyPath(_path->GetPath());
             if (!_ignoreTargetWalk)
                 init.SetWalk(target->IsWalking());
+
+            // ponytail: DK食尸鬼用SetVelocity控制spline持续时间≈repath间隔,避免"减速到0再启动"的卡顿感
+            // UpgradePath: 如后续发现跟随抖动,可微调LEAD_TIME或改为基于主人速度动态计算
+            if (isDKGhoul)
+            {
+                float pathLen = _path ? _path->GetPathLength() : 0.0f;
+                if (pathLen > 0.1f)
+                {
+                    float durSec = std::max(DK_RISEN_GHOUL_MOVING_LEAD_TIME,
+                        float(CHECK_INTERVAL) / 1000.0f);
+                    float velocity = pathLen / durSec;
+                    init.SetVelocity(velocity);
+                }
+                // 本次是因转向触发的repath→进入冷却,500ms内不再因转向重发
+                _dkGhoulMovingRepathTimer = DK_RISEN_GHOUL_MOVING_TURN_REPATH_MIN_INTERVAL;
+            }
+
             init.SetFacing(target->GetOrientation());
             init.Launch();
         }
