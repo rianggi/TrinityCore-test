@@ -13,8 +13,9 @@ UPDATE creature_template SET speed_walk = 1.2 WHERE entry = 28357;
 -- event_type=37 (SMART_EVENT_AI_INIT)
 -- action_type=59 (SMART_ACTION_SET_RUN)
 -- action_param1=0 (false = 走路模式)
-INSERT INTO smart_scripts (entryorguid, source_type, id, event_type, action_type, action_param1, action_param2, action_param3, action_param4, action_param5, action_param6, target_type, target_param1, target_param2, target_param3, target_param4, target_param5, target_param6, condition_id, comments)
-VALUES (28357, 0, 10, 37, 59, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 'Force walk on AI init');
+INSERT INTO smart_scripts (entryorguid, source_type, id, event_type, action_type, action_param1, comment)
+VALUES (28357, 0, 10, 37, 59, 0, 'Force walk on AI init')
+ON DUPLICATE KEY UPDATE event_type = 37, action_type = 59, action_param1 = 0, comment = 'Force walk on AI init';
 
 -- =============================================
 -- 回退 SQL (如需回退):
