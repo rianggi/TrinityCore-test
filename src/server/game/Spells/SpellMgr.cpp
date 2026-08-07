@@ -2718,6 +2718,18 @@ void SpellMgr::LoadSpellInfoStore()
     }
 
     TC_LOG_INFO("server.loading", ">> Loaded SpellInfo store in {} ms", GetMSTimeDiffToNow(oldMSTime));
+
+    // ponytail: 特殊处理 - 将阿彻鲁斯之眼控制台法术强制设为瞬发
+    // 原DB2配置中法术416753（召唤阿彻鲁斯之眼）有1.5秒施法时间
+    // 施法完成后触发法术51852（阿彻鲁斯之眼）又有2.6秒施法时间
+    // 导致双重进度条。官服中416753应为瞬发，只显示51852的进度条
+    if (SpellInfo const* spellInfoConst = GetSpellInfo(416753, DIFFICULTY_NONE))
+    {
+        SpellInfo* spellInfo = const_cast<SpellInfo*>(spellInfoConst);
+        if (SpellCastTimesEntry const* castTime = sSpellCastTimesStore.LookupEntry(1))
+            spellInfo->CastTimeEntry = castTime;
+        TC_LOG_INFO("server.loading", ">> Force spell 416753 (Summon Eye of Acherus) to instant cast");
+    }
 }
 
 void SpellMgr::UnloadSpellInfoStore()
