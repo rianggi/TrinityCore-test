@@ -2906,7 +2906,12 @@ void GameObject::Use(Unit* user, bool ignoreCastInProgress /*= false*/)
                 if (info->IsDespawnAtAction())
                     DespawnForPlayer(player, Seconds(m_respawnDelayTime));
                 else
-                    SetGoStateFor(GO_STATE_ACTIVE, player);
+                {
+                    // ponytail: 非消耗型GO保持READY状态，不再设置per-player ACTIVE状态
+                    // 原代码SetGoStateFor(GO_STATE_ACTIVE, player)设置的per-player状态有效期为respawn时间(180秒)
+                    // 导致玩家无法在180秒内重新交互
+                    // 保持全局GO_READY状态，允许立即重新交互
+                }
             }
             else
             {

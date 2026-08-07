@@ -12074,7 +12074,14 @@ void Unit::RemoveCharmedBy(Unit* charmer)
         player->SetClientControl(this, true);
 
     if (playerCharmer && this != charmer->GetFirstControlled())
+    {
+        // ponytail: 发送带有被魅惑单位GUID的空PetSpells包，让客户端正确清除控制条
+        // SendRemoveControlBar()发送空包（无PetGUID），客户端无法匹配之前设置的控制条
+        WorldPackets::Pet::PetSpells removePacket;
+        removePacket.PetGUID = this->GetGUID();
+        playerCharmer->SendDirectMessage(removePacket.Write());
         playerCharmer->SendRemoveControlBar();
+    }
 
     // a guardian should always have charminfo
     if (!IsGuardian())
